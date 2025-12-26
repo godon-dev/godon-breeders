@@ -1,0 +1,32 @@
+name: linux_network_stack_breeder
+target: f/breeder/linux_network_stack
+workspace: godon
+
+scripts:
+  - pattern: "breeder_worker.py"
+    path: "breeder/linux_network_stack/breeder_worker"
+    settings:
+      summary: "Autonomous Breeder Worker for Linux Network Stack Optimization"
+      description: "Self-driving Optuna optimization agent with ask/tell pattern for network parameter tuning"
+      timeout: 600
+
+  - pattern: "effectuation_ssh.py"
+    path: "breeder/linux_network_stack/effectuation_ssh"
+    settings:
+      summary: "SSH Effectuation with Fabric"
+      description: "Apply network parameters via SSH using Fabric v3 with batched sysctl commands"
+      timeout: 120
+
+  - pattern: "effectuation_recon.py"
+    path: "breeder/linux_network_stack/effectuation_recon"
+    settings:
+      summary: "Prometheus Reconnaissance"
+      description: "Gather network metrics from Prometheus after parameter changes"
+      timeout: 60
+
+flows:
+  - pattern: "effectuation_flow.yaml"
+    path: "breeder/linux_network_stack/effectuation_flow"
+    settings:
+      summary: "Network Effectuation Flow"
+      description: "Orchestrates SSH parameter application and metric gathering"
