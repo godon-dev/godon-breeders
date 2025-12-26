@@ -17,35 +17,40 @@
 # along with this godon. If not, see <http://www.gnu.org/licenses/>.
 #
 
-
-summary: "EffectuationFlow"
-description: "Effectuation Sequence Coordinating Flow"
+summary: "Network Stack Effectuation Flow"
+description: "Applies network parameters and gathers metrics for linux_network_stack breeder"
 value:
   modules:
-   - id: b
-     value:
-       path: f/breeder/linux_network_stack/effectuation_recon_step
-       type: script
-       is_trigger: false
-       input_transforms:
-         request_data:
-           type: static
-           value: null
-   - id: c
-     value:
-       path: f/breeder/linux_network_stack/effectuation_apply_step
-       type: script
-       is_trigger: false
-       input_transforms:
-         request_data:
-           type: static
-           value: null
+    - id: apply_config
+      value:
+        path: f/breeder/linux_network_stack/effectuation_ssh
+        type: script
+        summary: "Apply network parameters via SSH"
+    
+    - id: gather_metrics
+      value:
+        path: f/breeder/linux_network_stack/effectuation_recon
+        type: script
+        summary: "Gather metrics from Prometheus"
+        input_transforms:
+          config:
+            expr: flow_input.config
+          targets:
+            expr: flow_input.targets
+
 schema:
   $schema: https://json-schema.org/draft/2020-12/schema
   properties:
     config:
       type: object
-  required: []
+      description: "Breeder configuration with objectives and settings"
+    targets:
+      type: array
+      description: "Target systems to apply configurations to"
+      items:
+        type: object
+    params:
+      type: object
+      description: "Network parameters to apply"
+  required: [config, targets, params]
   type: object
-  order:
-    - config
