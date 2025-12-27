@@ -1,0 +1,11 @@
+name: reconnaissance
+target: f/reconnaissance
+workspace: godon
+
+scripts:
+  - pattern: "reconnaissance/prometheus.py"
+    path: "reconnaissance/prometheus"
+    settings:
+      summary: "Generic Prometheus Reconnaissance"
+      description: "Gather metrics from Prometheus with configurable stabilization delay, multi-sampling with median aggregation, and exponential backoff retry logic for transient failures."
+      timeout: 300

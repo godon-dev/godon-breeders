@@ -22,7 +22,8 @@ import optuna
 import logging
 import wmill
 import random
-from typing import Dict, Any
+from typing import Dict, Any, Optional
+from optuna.trial import TrialState
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -228,7 +229,8 @@ class BreederWorker:
                     
                 except Exception as e:
                     logger.error(f"Trial {trial.number} failed: {e}", exc_info=True)
-                    self.study.tell(trial, [float('inf')] * len(self.config.get('objectives', [])))
+                    self.study.tell(trial, state=TrialState.FAIL)
+                    logger.info(f"Trial {trial.number} marked as FAILED")
                     
         except Exception as e:
             logger.error(f"Breeder {self.breeder_id} failed: {e}", exc_info=True)
