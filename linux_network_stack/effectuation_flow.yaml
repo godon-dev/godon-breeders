@@ -24,7 +24,7 @@ value:
     - id: apply_config
       value:
         path: f/breeder/linux_network_stack/effectuation_ssh
-        type: script
+        type: playbook
         summary: "Apply network parameters via SSH"
     
     - id: gather_metrics
