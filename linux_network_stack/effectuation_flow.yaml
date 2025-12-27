@@ -23,13 +23,21 @@ value:
   modules:
     - id: apply_config
       value:
-        path: f/breeder/linux_network_stack/effectuation_ssh
-        type: playbook
-        summary: "Apply network parameters via SSH"
+        path: f/effectuation/ssh
+        type: script
+        summary: "Apply configuration via SSH"
+        input_transforms:
+          targets:
+            expr: flow_input.targets
+          playbook_path:
+            static: "f/breeder/linux_network_stack/sysctl_tasks"
+          playbook_vars:
+            expr:
+              sysctl_params: flow_input.params
     
     - id: gather_metrics
       value:
-        path: f/breeder/linux_network_stack/effectuation_recon
+        path: f/reconnaissance/prometheus
         type: script
         summary: "Gather metrics from Prometheus"
         input_transforms:

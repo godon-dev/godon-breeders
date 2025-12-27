@@ -10,23 +10,9 @@ scripts:
       description: "Self-driving Optuna optimization agent with ask/tell pattern for network parameter tuning"
       timeout: 600
 
-  - pattern: "effectuation_ssh.py"
-    path: "breeder/linux_network_stack/effectuation_ssh"
-    settings:
-      summary: "SSH Effectuation with Fabric"
-      description: "Apply network parameters via SSH using Fabric v3 with batched sysctl commands"
-      timeout: 120
-
-  - pattern: "effectuation_recon.py"
-    path: "breeder/linux_network_stack/effectuation_recon"
-    settings:
-      summary: "Prometheus Reconnaissance"
-      description: "Gather network metrics from Prometheus after parameter changes"
-      timeout: 60
-
-flows:
-  - pattern: "effectuation_flow.yaml"
+breeder_flows:
+  - pattern: "linux_network_stack/effectuation_flow.yaml"
     path: "breeder/linux_network_stack/effectuation_flow"
     settings:
-      summary: "Network Effectuation Flow"
-      description: "Orchestrates SSH parameter application and metric gathering"
+      summary: "Network Stack Effectuation Flow"
+      description: "Orchestrates sysctl parameter application and metric gathering via generic effectuation and reconnaissance modules"

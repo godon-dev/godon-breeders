@@ -18,15 +18,16 @@
 #
 
 import logging
+import time
 from typing import Dict, Any, List
 import wmill
 
 logger = logging.getLogger(__name__)
 
 
-def main(targets: List[Dict[str, Any]], sysctl_params: Dict[str, str]) -> Dict[str, Any]:
+def main(targets: List[Dict[str, Any]], playbook_path: str, playbook_vars: Dict[str, Any], stabilization_seconds: int = 0) -> Dict[str, Any]:
     """
-    Apply network parameters to targets via SSH using Windmill Ansible playbook
+    Apply configuration to targets via SSH using Windmill Ansible playbook
     
     Args:
         targets: List of target configurations with:
@@ -34,16 +35,18 @@ def main(targets: List[Dict[str, Any]], sysctl_params: Dict[str, str]) -> Dict[s
             - hostname: target hostname/IP
             - username: SSH username
             - ssh_key_variable_path: Windmill variable path to SSH key
-        sysctl_params: Dictionary of sysctl parameters to apply
+        playbook_path: Windmill path to the Ansible playbook to execute
+        playbook_vars: Variables to pass to the Ansible playbook
+        stabilization_seconds: Optional wait time after applying changes
     
     Returns:
         Dictionary with aggregated results and success status
     """
     logger.info(f"Starting SSH effectuation for {len(targets)} targets")
-    logger.info(f"Parameters: {list(sysctl_params.keys())}")
+    logger.info(f"Playbook: {playbook_path}")
+    logger.info(f"Variables: {list(playbook_vars.keys())}")
     
     all_results = []
-    playbook_path = "f/breeder/linux_network_stack/effectuation_ssh"
     
     for target in targets:
         target_id = target.get('id')
@@ -54,24 +57,23 @@ def main(targets: List[Dict[str, Any]], sysctl_params: Dict[str, str]) -> Dict[s
         logger.info(f"Processing target {target_id}: {hostname}")
         
         try:
+            # Build variables for this target
+            target_vars = {
+                **playbook_vars,
+                'target_hostname': hostname,
+                'username': username,
+                'ssh_key_variable': ssh_key_path
+            }
+            
             # Execute Ansible playbook via Windmill
-            result = wmill.run_flow(
-                playbook_path,
-                {
-                    "target_hostname": hostname,
-                    "username": username,
-                    "ssh_key_variable": ssh_key_path,
-                    "sysctl_params": sysctl_params
-                }
-            )
+            result = wmill.run_flow(playbook_path, target_vars)
             
             if result.get('success'):
                 all_results.append({
                     'target_id': target_id,
                     'hostname': hostname,
                     'success': True,
-                    'applied_count': result.get('applied_count', 0),
-                    'applied_params': result.get('applied_params', [])
+                    'result': result
                 })
             else:
                 all_results.append({
@@ -90,10 +92,10 @@ def main(targets: List[Dict[str, Any]], sysctl_params: Dict[str, str]) -> Dict[s
                 'error': f"Target processing failed: {str(e)}"
             })
     
-    # Wait for network stabilization
-    logger.info("Waiting for network stabilization (5 seconds)")
-    import time
-    time.sleep(5)
+    # Optional stabilization wait
+    if stabilization_seconds > 0:
+        logger.info(f"Waiting {stabilization_seconds}s for system stabilization")
+        time.sleep(stabilization_seconds)
     
     # Aggregate results
     success_count = sum(1 for r in all_results if r.get('success', False))
@@ -102,7 +104,6 @@ def main(targets: List[Dict[str, Any]], sysctl_params: Dict[str, str]) -> Dict[s
     summary = {
         'status': 'completed',
         'targets_count': len(targets),
-        'parameters_count': len(sysctl_params),
         'successful_changes': success_count,
         'failed_changes': total_count - success_count,
         'results': all_results
