@@ -23,6 +23,8 @@ import logging
 import wmill
 import random
 import hashlib
+import datetime
+import dateutil.parser
 from typing import Dict, Any, Optional, List
 from optuna.trial import TrialState
 from optuna.samplers import TPESampler, NSGAIISampler, NSGAIIISampler, RandomSampler, QMCSampler
@@ -83,6 +85,12 @@ class BreederWorker:
         self.breeder_uuid = breeder_config.get('uuid', breeder_config.get('name', 'unknown'))
         self.breeder_id = self.breeder_uuid  # For database/communication
         self.worker_id = f"{self.breeder_type}_worker_{self.breeder_uuid}"
+        
+        # Parse creation timestamp for completion criteria
+        creation_ts_str = config.get('creation_ts')
+        if not creation_ts_str:
+            raise ValueError("Required field 'creation_ts' missing from config")
+        self.start_time = dateutil.parser.parse(creation_ts_str)
         
         # Assign sampler to this worker for algorithm diversity
         self.sampler_type = self._assign_sampler()
@@ -318,8 +326,10 @@ class BreederWorker:
             return {obj.get('name'): float('inf') for obj in self.config.get('objectives', [])}
     
     def _should_continue(self) -> bool:
-        min_iterations = self.config.get('run', {}).get('iterations', {}).get('min', 10)
-        max_iterations = self.config.get('run', {}).get('iterations', {}).get('max', 1000)
+        completion_criteria = self.config.get('run', {}).get('completion_criteria', {})
+        
+        min_iterations = completion_criteria.get('iterations', {}).get('min', 10)
+        max_iterations = completion_criteria.get('iterations', {}).get('max', 1000)
         
         n_trials = len(self.study.trials)
         
@@ -329,7 +339,75 @@ class BreederWorker:
         if n_trials >= max_iterations:
             logger.info(f"Stopping: {n_trials} >= {max_iterations} max iterations")
             return False
+        
+        # Check time budget
+        if self._check_time_budget(completion_criteria):
+            logger.info("Stopping: Time budget exceeded")
+            return False
+        
+        # Check quality thresholds
+        if completion_criteria.get('quality_achieved', False):
+            if self._check_quality_thresholds():
+                logger.info("Stopping: All quality thresholds achieved")
+                return False
             
+        return True
+    
+    def _check_time_budget(self, completion_criteria: dict) -> bool:
+        """Check if time budget has been exceeded"""
+        timing_config = completion_criteria.get('timing', {})
+        end_time_str = timing_config.get('end')
+        
+        if not end_time_str:
+            return False
+        
+        if not hasattr(self, 'start_time'):
+            return False
+        
+        # Parse time string (e.g., "7d", "24h", "60m")
+        import re
+        match = re.match(r'(\d+)([dhm])', end_time_str)
+        if not match:
+            logger.warning(f"Invalid time format: {end_time_str}")
+            return False
+        
+        value, unit = match.groups()
+        value = int(value)
+        
+        # Convert to seconds
+        unit_seconds = {'d': 86400, 'h': 3600, 'm': 60}
+        budget_seconds = value * unit_seconds[unit]
+        
+        elapsed_seconds = (datetime.datetime.now() - self.start_time).total_seconds()
+        
+        return elapsed_seconds >= budget_seconds
+    
+    def _check_quality_thresholds(self) -> bool:
+        """Check if all objectives have reached their quality thresholds"""
+        if not self.study.best_trial:
+            return False
+        
+        objectives = self.config.get('objectives', [])
+        if not objectives:
+            return False
+        
+        # Check if all objectives have quality_threshold defined
+        for objective in objectives:
+            if 'quality_threshold' not in objective:
+                return False
+        
+        # Check if all thresholds achieved
+        for obj_value, objective in zip(self.study.best_trial.values, objectives):
+            threshold = objective.get('quality_threshold')
+            direction = objective.get('direction', 'minimize')
+            
+            if direction == 'minimize':
+                if obj_value > threshold:
+                    return False
+            elif direction == 'maximize':
+                if obj_value < threshold:
+                    return False
+        
         return True
     
     def _update_state(self):
