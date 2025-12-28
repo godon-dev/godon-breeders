@@ -22,8 +22,10 @@ import optuna
 import logging
 import wmill
 import random
-from typing import Dict, Any, Optional
+import hashlib
+from typing import Dict, Any, Optional, List
 from optuna.trial import TrialState
+from optuna.samplers import TPESampler, NSGAIISampler, NSGAIIISampler, RandomSampler, QMCSampler
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -32,9 +34,10 @@ logger.setLevel(logging.DEBUG)
 class CommunicationCallback:
     """Shares successful trials with cooperating breeders for metaheuristic learning"""
     
-    def __init__(self, storage: str, probability: float = 0.8):
+    def __init__(self, storage: str, probability: float = 0.8, share_within_breeder: bool = True):
         self.storage = storage
         self.com_probability = probability
+        self.share_within_breeder = share_within_breeder
         self.logger = logging.getLogger('communication-callback')
         self.logger.setLevel(logging.DEBUG)
     
@@ -45,6 +48,12 @@ class CommunicationCallback:
             
             for study_name in study_names:
                 if study_name != study.study_name:
+                    # Skip sharing within same breeder if disabled
+                    if not self.share_within_breeder:
+                        breeder_prefix = study.study_name.split('_')[0]
+                        if study_name.startswith(breeder_prefix):
+                            continue
+                    
                     try:
                         cooperating_study = optuna.load_study(study_name=study_name, storage=self.storage)
                         cooperating_study.add_trial(trial)
@@ -75,10 +84,63 @@ class BreederWorker:
         self.breeder_id = self.breeder_uuid  # For database/communication
         self.worker_id = f"{self.breeder_type}_worker_{self.breeder_uuid}"
         
+        # Assign sampler to this worker for algorithm diversity
+        self.sampler_type = self._assign_sampler()
+        
         self.study = self._load_or_create_study()
         self.communication_callback = self._setup_communication()
         self._update_state()
         
+    def _assign_sampler(self) -> str:
+        """Assign a sampler type to this worker for algorithm diversity"""
+        parallel_workers = self.config.get('run', {}).get('parallel', 1)
+        
+        if parallel_workers <= 1:
+            logger.info("Single worker mode, using default TPE sampler")
+            return 'tpe'
+        
+        # Automatically enable algorithm diversity for parallel workers
+        # Only use as many samplers as we have workers
+        all_samplers = ['tpe', 'nsga2', 'random', 'nsga3', 'qmc']
+        num_samplers = min(parallel_workers, len(all_samplers))
+        available_samplers = all_samplers[:num_samplers]
+        
+        # Assign sampler based on worker_id hash for consistent assignment
+        worker_hash = int(hashlib.md5(self.worker_id.encode()).hexdigest(), 16)
+        sampler_index = worker_hash % len(available_samplers)
+        assigned_sampler = available_samplers[sampler_index]
+        
+        logger.info(f"Algorithm diversity auto-enabled ({len(available_samplers)} samplers for {parallel_workers} workers): Worker {self.worker_id} assigned '{assigned_sampler}' sampler")
+        return assigned_sampler
+    
+    def _create_sampler(self, sampler_type: str) -> optuna.samplers.BaseSampler:
+        """Create Optuna sampler instance based on type"""
+        # Use sensible defaults for each sampler type
+        
+        if sampler_type == 'tpe':
+            return TPESampler(
+                multivariate=True,
+                group=True,
+                constant_liar=False
+            )
+        elif sampler_type == 'nsga2':
+            return NSGAIISampler(
+                population_size=50,
+                mutation_prob=0.1,
+                crossover_prob=0.9
+            )
+        elif sampler_type == 'nsga3':
+            return NSGAIIISampler(
+                population_size=50
+            )
+        elif sampler_type == 'random':
+            return RandomSampler()
+        elif sampler_type == 'qmc':
+            return QMCSampler()
+        else:
+            logger.warning(f"Unknown sampler '{sampler_type}', falling back to TPE")
+            return TPESampler()
+    
     def _get_db_url(self) -> str:
         db_config = {
             'user': os.environ.get("GODON_ARCHIVE_DB_USER", "postgres"),
@@ -90,7 +152,13 @@ class BreederWorker:
         return f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
     
     def _load_or_create_study(self) -> optuna.Study:
-        study_name = f"{self.breeder_id}_study"
+        # Create sampler-specific study name for algorithm diversity
+        parallel_workers = self.config.get('run', {}).get('parallel', 1)
+        if parallel_workers > 1:
+            study_name = f"{self.breeder_id}_{self.sampler_type}_study"
+        else:
+            study_name = f"{self.breeder_id}_study"
+        
         directions = [obj.get('direction') for obj in self.config.get('objectives', [])]
         
         try:
@@ -99,7 +167,19 @@ class BreederWorker:
             logger.info(f"Loaded existing study: {study_name} with {len(study.trials)} trials")
         except (KeyError, ValueError):
             storage = optuna.storages.RDBStorage(url=self._get_db_url())
-            study = optuna.create_study(study_name=study_name, directions=directions, storage=storage)
+            
+            # Create sampler if algorithm diversity is enabled
+            sampler = None
+            if parallel_workers > 1:
+                sampler = self._create_sampler(self.sampler_type)
+                logger.info(f"Created study {study_name} with {self.sampler_type} sampler")
+            
+            study = optuna.create_study(
+                study_name=study_name, 
+                directions=directions, 
+                storage=storage,
+                sampler=sampler
+            )
             logger.info(f"Created new study: {study_name}")
         
         return study
@@ -107,12 +187,17 @@ class BreederWorker:
     def _setup_communication(self) -> Optional[CommunicationCallback]:
         """Setup communication callback for breeder cooperation"""
         cooperation_config = self.config.get('cooperation', {})
+        parallel_workers = self.config.get('run', {}).get('parallel', 1)
         
         if cooperation_config.get('active', False):
             probability = cooperation_config.get('consolidation', {}).get('probability', 0.8)
             storage = self._get_db_url()
-            logger.info(f"Communication enabled with probability: {probability}")
-            return CommunicationCallback(storage=storage, probability=probability)
+            
+            # If algorithm diversity is enabled (parallel > 1), share within breeder (across sampler-specific studies)
+            share_within_breeder = parallel_workers > 1
+            
+            logger.info(f"Communication enabled with probability: {probability}, share_within_breeder: {share_within_breeder}")
+            return CommunicationCallback(storage=storage, probability=probability, share_within_breeder=share_within_breeder)
         else:
             logger.info("Communication disabled")
             return None
@@ -135,7 +220,7 @@ class BreederWorker:
         return params
     
     def _execute_trial(self, params: Dict[str, Any]) -> Dict[str, float]:
-        flow_path = "f/breeder/linux_network_stack/effectuation_flow"
+        flow_path = "f/breeder/linux_performance/effectuation_flow"
         
         # Get targets from configuration
         targets = self.config.get('effectuation', {}).get('targets', [])
