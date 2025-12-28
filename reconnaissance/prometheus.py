@@ -44,6 +44,35 @@ def extract_scalar_value(query_result: Dict[str, Any]) -> Optional[float]:
     return float(value)
 
 
+def aggregate_samples(samples: List[float], method: str = 'median') -> float:
+    """
+    Aggregate multiple samples using specified method
+    
+    Args:
+        samples: List of sample values (may contain None)
+        method: Aggregation method ('median', 'mean', 'min', 'max')
+        
+    Returns:
+        Aggregated value, or float('inf') if no valid samples exist
+    """
+    valid_samples = [s for s in samples if s is not None and s != float('inf')]
+    
+    if not valid_samples:
+        return float('inf')
+    
+    if method == 'median':
+        return statistics.median(valid_samples)
+    elif method == 'mean':
+        return statistics.mean(valid_samples)
+    elif method == 'min':
+        return min(valid_samples)
+    elif method == 'max':
+        return max(valid_samples)
+    else:
+        # Default to median for unknown methods
+        return statistics.median(valid_samples)
+
+
 def prometheus_query_with_retry(prom_conn, query: str, max_retries: int = 3, initial_delay: int = 5) -> Dict[str, Any]:
     """
     Execute Prometheus query with exponential backoff retry logic
@@ -155,16 +184,18 @@ def main(config: Dict[str, Any], targets: List[Dict[str, Any]]) -> Dict[str, Any
                     if i < samples - 1 and interval > 0:
                         time.sleep(interval)
                 
-                # Aggregate samples using median
-                valid_samples = [s for s in sample_values if s is not None]
+                # Get aggregation method
+                aggregation_method = recon_config.get('aggregation', 'median')
                 
-                if not valid_samples:
+                # Aggregate samples
+                final_value = aggregate_samples(sample_values, aggregation_method)
+                
+                if final_value == float('inf'):
                     logger.warning(f"All samples returned NaN for {objective_name}")
-                    metric_data[objective_name] = float('inf')
-                else:
-                    final_value = statistics.median(valid_samples)
                     metric_data[objective_name] = final_value
-                    logger.info(f"Metric {objective_name}: {final_value} (median of {len(valid_samples)} samples)")
+                else:
+                    metric_data[objective_name] = final_value
+                    logger.info(f"Metric {objective_name}: {final_value} (using {aggregation_method} of {len([s for s in sample_values if s is not None])} samples)")
                     
             except Exception as e:
                 logger.error(f"Failed to gather metric {objective_name}: {e}")
