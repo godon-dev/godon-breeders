@@ -48,6 +48,7 @@ class TestSamplerAssignment:
                 'name': 'test_breeder',
                 'uuid': 'test_uuid_123'
             },
+            'creation_ts': '2025-01-15T10:30:00Z',
             'run': {
                 'parallel': 1
             },
@@ -71,6 +72,7 @@ class TestSamplerAssignment:
                 'name': 'test_breeder',
                 'uuid': 'test_uuid_123'
             },
+            'creation_ts': '2025-01-15T10:30:00Z',
             'run': {
                 'parallel': 3
             },
@@ -105,6 +107,7 @@ class TestSamplerAssignment:
                 'name': 'test_breeder',
                 'uuid': 'deterministic_test_uuid'
             },
+            'creation_ts': '2025-01-15T10:30:00Z',
             'run': {
                 'parallel': 3
             },
@@ -135,6 +138,7 @@ class TestSamplerCreation:
                 'name': 'test_breeder',
                 'uuid': 'test_uuid'
             },
+            'creation_ts': '2025-01-15T10:30:00Z',
             'run': {'parallel': 2},
             'objectives': [{'name': 'test_obj', 'direction': 'maximize'}],
             'breeder_database': 'test_db'
@@ -165,6 +169,7 @@ class TestSamplerCreation:
                 'name': 'test_breeder',
                 'uuid': 'test_uuid'
             },
+            'creation_ts': '2025-01-15T10:30:00Z',
             'run': {'parallel': 2},
             'objectives': [{'name': 'test_obj', 'direction': 'maximize'}],
             'breeder_database': 'test_db'
@@ -199,6 +204,7 @@ class TestStudyNaming:
                 'name': 'test_breeder',
                 'uuid': 'test_uuid'
             },
+            'creation_ts': '2025-01-15T10:30:00Z',
             'run': {'parallel': 1},
             'objectives': [{'name': 'test_obj', 'direction': 'maximize'}],
             'breeder_database': 'test_db'
@@ -226,6 +232,7 @@ class TestStudyNaming:
                 'name': 'test_breeder',
                 'uuid': 'test_uuid'
             },
+            'creation_ts': '2025-01-15T10:30:00Z',
             'run': {'parallel': 3},
             'objectives': [{'name': 'test_obj', 'direction': 'maximize'}],
             'breeder_database': 'test_db'
@@ -269,6 +276,7 @@ class TestCommunicationCallback:
                 'name': 'test_breeder',
                 'uuid': 'test_uuid'
             },
+            'creation_ts': '2025-01-15T10:30:00Z',
             'run': {'parallel': 3},
             'cooperation': {'active': True, 'consolidation': {'probability': 0.8}},
             'objectives': [{'name': 'test_obj', 'direction': 'maximize'}],
