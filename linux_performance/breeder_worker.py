@@ -395,7 +395,22 @@ class BreederWorker:
             logger.info(f"Best values: {self.study.best_trial.values}")
 
 
-def main(config: Dict[str, Any]) -> Dict[str, Any]:
+def main(config: Dict[str, Any], breeder_id: str = None, run_id: int = None, target_id: int = None) -> Dict[str, Any]:
+    """
+    Main entry point for breeder worker.
+    
+    Args:
+        config: Breeder configuration (full or sharded, depending on mode)
+        breeder_id: UUID of the breeder (for state updates)
+        run_id: Parallel run identifier (for logging)
+        target_id: Target identifier (for logging)
+    
+    Returns:
+        Worker execution results
+    """
+    if breeder_id:
+        logger.info(f"Starting worker for breeder: {breeder_id}, run: {run_id}, target: {target_id}")
+    
     worker = BreederWorker(config)
     worker.run()
     
@@ -403,6 +418,8 @@ def main(config: Dict[str, Any]) -> Dict[str, Any]:
         'worker_id': worker.worker_id,
         'breeder_type': worker.breeder_type,
         'breeder_id': worker.breeder_id,
+        'run_id': run_id,
+        'target_id': target_id,
         'total_trials': len(worker.study.trials),
         'best_params': worker.study.best_trial.params if worker.study.best_trial else None,
         'best_values': worker.study.best_trial.values if worker.study.best_trial else None,

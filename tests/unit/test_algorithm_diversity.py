@@ -149,12 +149,11 @@ class TestSamplerCreation:
         with patch('linux_performance.breeder_worker.random.choice') as mock_random:
             mock_random.side_effect = [True, False, True, 10]  # multivariate, group, constant_liar, n_startup
             
-            from optuna.samplers import TPESampler
-            with patch.object(TPESampler, '__init__', return_value=None) as mock_init:
+            with patch('linux_performance.breeder_worker.TPESampler') as mock_tpe:
                 worker._create_sampler('tpe')
                 
                 # Check that TPESampler was called with randomized config
-                assert mock_init.called, "TPESampler should be instantiated"
+                assert mock_tpe.called, "TPESampler should be instantiated"
     
     @patch('linux_performance.breeder_worker.BreederWorker._load_or_create_study')
     @patch('linux_performance.breeder_worker.BreederWorker._setup_communication')
@@ -181,11 +180,10 @@ class TestSamplerCreation:
             # population_size, mutation_prob, crossover_prob, crossover
             mock_random.side_effect = [50, 0.1, 0.9, 'uniform']
             
-            from optuna.samplers import NSGAIISampler
-            with patch.object(NSGAIISampler, '__init__', return_value=None) as mock_init:
+            with patch('linux_performance.breeder_worker.NSGAIISampler') as mock_nsga2:
                 worker._create_sampler('nsga2')
                 
-                assert mock_init.called, "NSGAIISampler should be instantiated"
+                assert mock_nsga2.called, "NSGAIISampler should be instantiated"
 
 
 class TestStudyNaming:
@@ -208,6 +206,9 @@ class TestStudyNaming:
         
         mock_storage = MagicMock()
         mock_optuna.storages.RDBStorage.return_value = mock_storage
+        
+        # Make load_study fail so create_study gets called
+        mock_optuna.load_study.side_effect = KeyError("Study not found")
         mock_optuna.create_study.return_value = MagicMock()
         
         worker = BreederWorker(config)
@@ -232,6 +233,9 @@ class TestStudyNaming:
         
         mock_storage = MagicMock()
         mock_optuna.storages.RDBStorage.return_value = mock_storage
+        
+        # Make load_study fail so create_study gets called
+        mock_optuna.load_study.side_effect = KeyError("Study not found")
         mock_optuna.create_study.return_value = MagicMock()
         
         worker = BreederWorker(config)
