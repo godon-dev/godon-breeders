@@ -15,8 +15,8 @@ Breeders are self-driving optimization agents that use **Optuna ask/tell pattern
 
 ## Available Breeders
 
-### linux_network_stack
-Optimizes Linux network parameters (sysctl) for improved TCP performance.
+### linux_performance
+Optimizes Linux system parameters (sysctl) for improved performance. Supports network, memory, CPU, and custom optimization objectives via Prometheus metrics.
 
 ## License
 

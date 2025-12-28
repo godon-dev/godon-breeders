@@ -116,7 +116,7 @@ def prometheus_query_with_retry(prom_conn, query: str, max_retries: int = 3, ini
 
 def main(config: Dict[str, Any], targets: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Gather network metrics from Prometheus for linux_network_stack breeder
+    Gather metrics from Prometheus for linux_performance breeder
     
     Args:
         config: Breeder configuration with objectives and reconnaissance settings
