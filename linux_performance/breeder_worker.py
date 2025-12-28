@@ -114,29 +114,93 @@ class BreederWorker:
         return assigned_sampler
     
     def _create_sampler(self, sampler_type: str) -> optuna.samplers.BaseSampler:
-        """Create Optuna sampler instance based on type"""
-        # Use sensible defaults for each sampler type
+        """Create Optuna sampler instance with randomized parameter selection from known-good profiles
+        
+        NOTE: This is for algorithm diversity + future hyperheuristic optimization.
+        Parameter ranges are based on Optuna documentation and common practices.
+        Some ranges are more researched than others - marked with confidence levels below.
+        """
+        
+        # Define parameter profiles with confidence levels
+        # HIGH = Well-researched, documented defaults and variations
+        # MEDIUM = Educated guesses from GA/BO literature, less certain
+        # LOW = Uncertain, needs empirical validation
+        sampler_profiles = {
+            'tpe': {
+                'multivariate': [True, False],  # HIGH - Well understood parameter
+                'group': [True, False],  # HIGH - Documented behavior
+                'constant_liar': [True, False],  # HIGH - Proven for parallel optimization
+                'n_startup_trials': [5, 10, 20]  # MEDIUM - Educated guess, needs validation
+            },
+            'nsga2': {
+                'population_size': [20, 50, 100],  # HIGH - Default 50, range well-established
+                'mutation_prob': [0.05, 0.1, 0.15],  # LOW - Educated guess from GA literature
+                'crossover_prob': [0.8, 0.9, 0.95],  # MEDIUM - Common GA values, less certain for Optuna
+                'crossover': ['uniform', 'UNDX', 'SPX']  # LOW - UNDX/SPX need validation
+            },
+            'nsga3': {
+                'population_size': [50, 100]  # HIGH - Safe variations on default
+            },
+            'random': {
+                'seed': [None]  # HIGH - Placeholder for future seed diversity
+            },
+            'qmc': {
+                'seed': [None]  # HIGH - Placeholder for future seed diversity
+            }
+        }
         
         if sampler_type == 'tpe':
-            return TPESampler(
-                multivariate=True,
-                group=True,
-                constant_liar=False
-            )
+            profile = sampler_profiles['tpe']
+            config = {
+                'multivariate': random.choice(profile['multivariate']),
+                'group': random.choice(profile['group']),
+                'constant_liar': random.choice(profile['constant_liar']),
+                'n_startup_trials': random.choice(profile['n_startup_trials'])
+            }
+            logger.info(f"Created TPE sampler with config: {config}")
+            return TPESampler(**config)
+        
         elif sampler_type == 'nsga2':
-            return NSGAIISampler(
-                population_size=50,
-                mutation_prob=0.1,
-                crossover_prob=0.9
-            )
+            profile = sampler_profiles['nsga2']
+            population_size = random.choice(profile['population_size'])
+            crossover = random.choice(profile['crossover'])
+            
+            # Skip crossover-specific parameters if not using that crossover
+            crossover_params = {}
+            if crossover == 'uniform':
+                crossover_params['crossover'] = 'uniform'
+            elif crossover in ['UNDX', 'SPX']:
+                crossover_params['crossover'] = crossover
+                crossover_params['population_size'] = max(population_size, 3)  # UNDX/SPX need >=3 parents
+            
+            config = {
+                'population_size': population_size,
+                'mutation_prob': random.choice(profile['mutation_prob']),
+                'crossover_prob': random.choice(profile['crossover_prob']),
+                **crossover_params
+            }
+            logger.info(f"Created NSGAII sampler with config: {config}")
+            return NSGAIISampler(**config)
+        
         elif sampler_type == 'nsga3':
-            return NSGAIIISampler(
-                population_size=50
-            )
+            profile = sampler_profiles['nsga3']
+            population_size = random.choice(profile['population_size'])
+            config = {'population_size': population_size}
+            logger.info(f"Created NSGAIII sampler with config: {config}")
+            return NSGAIIISampler(**config)
+        
         elif sampler_type == 'random':
-            return RandomSampler()
+            seed = random.choice(sampler_profiles['random']['seed'])
+            config = {'seed': seed} if seed is not None else {}
+            logger.info(f"Created Random sampler with config: {config}")
+            return RandomSampler(**config)
+        
         elif sampler_type == 'qmc':
-            return QMCSampler()
+            seed = random.choice(sampler_profiles['qmc']['seed'])
+            config = {'seed': seed} if seed is not None else {}
+            logger.info(f"Created QMC sampler with config: {config}")
+            return QMCSampler(**config)
+        
         else:
             logger.warning(f"Unknown sampler '{sampler_type}', falling back to TPE")
             return TPESampler()
