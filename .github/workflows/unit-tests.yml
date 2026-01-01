@@ -24,6 +24,7 @@ jobs:
         pip install prometheus-api-client
         pip install optuna
         pip install pyyaml
+        pip install scipy
 
     - name: Run unit tests
       run: |
