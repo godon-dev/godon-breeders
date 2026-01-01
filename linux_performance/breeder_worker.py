@@ -310,12 +310,7 @@ class BreederWorker:
         parallel_workers = self.config.get('run', {}).get('parallel', 1)
         
         if cooperation_config.get('active', False):
-            # Validate cooperation requires multiple workers
-            if parallel_workers <= 1:
-                logger.warning(f"Cooperation enabled but parallel={parallel_workers}. Cooperation requires parallel > 1. Disabling cooperation.")
-                return None
-            
-            # Get strategy configuration
+            # Get strategy configuration (controller validates parallel > 1)
             share_strategy = cooperation_config.get('share_strategy', 'probabilistic')
             probability = cooperation_config.get('probability', 0.8)
             top_percentile = cooperation_config.get('top_percentile', 0.2)
