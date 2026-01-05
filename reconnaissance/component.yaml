@@ -1,5 +1,5 @@
 name: reconnaissance
-target: f/reconnaissance
+target: reconnaissance
 workspace: godon
 
 scripts:
