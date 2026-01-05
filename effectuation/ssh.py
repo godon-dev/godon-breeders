@@ -50,17 +50,17 @@ def main(targets: List[Dict[str, Any]], playbook_path: str, playbook_vars: Dict[
     
     for target in targets:
         target_id = target.get('id')
-        hostname = target.get('hostname')
+        address = target.get('address')
         username = target.get('username', 'root')
         ssh_key_path = target.get('ssh_key_variable_path')
         
-        logger.info(f"Processing target {target_id}: {hostname}")
+        logger.info(f"Processing target {target_id}: {address}")
         
         try:
             # Build variables for this target
             target_vars = {
                 **playbook_vars,
-                'target_hostname': hostname,
+                'target_hostname': address,
                 'username': username,
                 'ssh_key_variable': ssh_key_path
             }
@@ -71,14 +71,14 @@ def main(targets: List[Dict[str, Any]], playbook_path: str, playbook_vars: Dict[
             if result.get('success'):
                 all_results.append({
                     'target_id': target_id,
-                    'hostname': hostname,
+                    'address': address,
                     'success': True,
                     'result': result
                 })
             else:
                 all_results.append({
                     'target_id': target_id,
-                    'hostname': hostname,
+                    'address': address,
                     'success': False,
                     'error': result.get('error', 'Unknown error')
                 })
@@ -87,7 +87,7 @@ def main(targets: List[Dict[str, Any]], playbook_path: str, playbook_vars: Dict[
             logger.error(f"Failed to process target {target_id}: {e}", exc_info=True)
             all_results.append({
                 'target_id': target_id,
-                'hostname': hostname,
+                'address': address,
                 'success': False,
                 'error': f"Target processing failed: {str(e)}"
             })

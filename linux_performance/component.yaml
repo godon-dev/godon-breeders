@@ -1,5 +1,5 @@
 name: linux_performance_breeder
-target: f/breeder/linux_performance
+target: breeder/linux_performance
 workspace: godon
 
 scripts:
