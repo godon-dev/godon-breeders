@@ -144,7 +144,7 @@ def main(config: Dict[str, Any], targets: List[Dict[str, Any]]) -> Dict[str, Any
         objective_name = objective.get('name')
         logger.info(f"Gathering metric: {objective_name}")
         
-        recon_config = objective.get('reconaissance', {})
+        recon_config = objective.get('reconnaissance', {})
         recon_service = recon_config.get('service')
         
         if recon_service == 'prometheus':
