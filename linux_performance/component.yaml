@@ -3,16 +3,14 @@ target: breeder/linux_performance
 workspace: godon
 
 scripts:
-  - pattern: "breeder_worker.py"
-    path: "breeder/linux_performance/breeder_worker"
+  - pattern: "*.py"
     settings:
       summary: "Autonomous Breeder Worker for Linux Performance Optimization"
       description: "Self-driving Optuna optimization agent with ask/tell pattern for system parameter tuning"
       timeout: 600
 
 flows:
-  - pattern: "linux_performance/effectuation_flow.yaml"
-    path: "breeder/linux_performance/effectuation_flow"
+  - pattern: "effectuation_flow.yaml"
     settings:
       summary: "Linux Performance Effectuation Flow"
       description: "Orchestrates sysctl parameter application and metric gathering via generic effectuation and reconnaissance modules"
