@@ -3,8 +3,7 @@ target: effectuation
 workspace: godon
 
 scripts:
-  - pattern: "effectuation/ssh.py"
-    path: "effectuation/ssh"
+  - pattern: "ssh.py"
     settings:
       summary: "Generic SSH Effectuation"
       description: "Apply configuration via SSH using Windmill Ansible playbooks. Accepts any playbook path and variables for maximum flexibility across different optimization domains."
