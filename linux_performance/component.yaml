@@ -10,7 +10,7 @@ scripts:
       timeout: 600
 
 flows:
-  - pattern: "*.yaml"
+  - pattern: "effectuation_flow.yaml"
     settings:
       summary: "Linux Performance Effectuation Flow"
       description: "Orchestrates sysctl parameter application and metric gathering via generic effectuation and reconnaissance modules"
