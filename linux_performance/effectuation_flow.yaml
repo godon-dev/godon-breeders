@@ -28,12 +28,14 @@ value:
         summary: "Apply configuration via SSH"
         input_transforms:
           targets:
+            type: javascript
             expr: flow_input.targets
           playbook_path:
-            static: "f/breeder/linux_performance/sysctl_tasks"
+            type: static
+            value: "f/breeder/linux_performance/sysctl_tasks"
           playbook_vars:
-            expr:
-              sysctl_params: flow_input.params
+            type: javascript
+            expr: "flow_input.params"
     
     - id: gather_metrics
       value:
@@ -42,8 +44,10 @@ value:
         summary: "Gather metrics from Prometheus"
         input_transforms:
           config:
+            type: javascript
             expr: flow_input.config
           targets:
+            type: javascript
             expr: flow_input.targets
 
 schema:
