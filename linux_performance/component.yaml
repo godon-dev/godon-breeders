@@ -10,7 +10,7 @@ scripts:
       description: "Self-driving Optuna optimization agent with ask/tell pattern for system parameter tuning"
       timeout: 600
 
-breeder_flows:
+flows:
   - pattern: "linux_performance/effectuation_flow.yaml"
     path: "breeder/linux_performance/effectuation_flow"
     settings:
