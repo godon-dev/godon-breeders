@@ -24,7 +24,9 @@ import os
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
-from reconnaissance.prometheus import extract_scalar_value, aggregate_samples
+from reconnaissance.prometheus import extract_scalar_value, aggregate_samples, _gather_single_metric
+from unittest.mock import MagicMock, patch
+import time
 
 
 class TestExtractScalarValue:
@@ -160,3 +162,183 @@ class TestAggregateSamples:
         
         # Should default to median
         assert result == 15.0
+
+class TestGatherSingleMetric:
+    """Test _gather_single_metric function"""
+
+    @patch('reconnaissance.prometheus.prometheus_query_with_retry')
+    @patch('time.sleep')
+    def test_gather_metric_single_sample_no_stabilization(self, mock_sleep, mock_query):
+        """Test gathering a single metric without stabilization wait"""
+        # Setup mock
+        mock_query.return_value = {
+            'resultType': 'scalar',
+            'result': [1234567890, '42.5']
+        }
+
+        prom_conn = MagicMock()
+
+        recon_config = {
+            'service': 'prometheus',
+            'query': 'rate(http_requests_total[5m])',
+            'stabilization_seconds': 0,
+            'samples': 1,
+            'interval': 0,
+            'aggregation': 'median'
+        }
+
+        result = _gather_single_metric(prom_conn, 'test_metric', recon_config)
+
+        # Verify result
+        assert result == 42.5
+        # Verify no stabilization sleep was called
+        mock_sleep.assert_not_called()
+        # Verify query was called once
+        mock_query.assert_called_once()
+
+    @patch('reconnaissance.prometheus.prometheus_query_with_retry')
+    @patch('time.sleep')
+    def test_gather_metric_with_stabilization_wait(self, mock_sleep, mock_query):
+        """Test that stabilization_seconds triggers a wait before sampling"""
+        mock_query.return_value = {
+            'resultType': 'scalar',
+            'result': [1234567890, '100.0']
+        }
+
+        prom_conn = MagicMock()
+
+        recon_config = {
+            'service': 'prometheus',
+            'query': 'rate(cpu_usage[5m])',
+            'stabilization_seconds': 30,
+            'samples': 1,
+            'interval': 0,
+            'aggregation': 'median'
+        }
+
+        result = _gather_single_metric(prom_conn, 'cpu_metric', recon_config)
+
+        # Verify stabilization sleep was called before query
+        assert mock_sleep.call_count >= 1
+        # First call should be for 30 seconds
+        mock_sleep.assert_any_call(30)
+        assert result == 100.0
+
+    @patch('reconnaissance.prometheus.prometheus_query_with_retry')
+    @patch('time.sleep')
+    def test_gather_metric_multiple_samples_with_interval(self, mock_sleep, mock_query):
+        """Test gathering multiple samples with interval between them"""
+        mock_query.return_value = {
+            'resultType': 'scalar',
+            'result': [1234567890, '50.0']
+        }
+
+        prom_conn = MagicMock()
+
+        recon_config = {
+            'service': 'prometheus',
+            'query': 'rate(memory_usage[5m])',
+            'stabilization_seconds': 0,
+            'samples': 3,
+            'interval': 5,
+            'aggregation': 'median'
+        }
+
+        result = _gather_single_metric(prom_conn, 'memory_metric', recon_config)
+
+        # Verify query was called 3 times
+        assert mock_query.call_count == 3
+        # Verify interval sleeps (should be called between samples, not after last)
+        # 3 samples = 2 intervals between them
+        interval_calls = [call for call in mock_sleep.call_args_list if call[0][0] == 5]
+        assert len(interval_calls) == 2
+        assert result == 50.0
+
+    @patch('reconnaissance.prometheus.prometheus_query_with_retry')
+    def test_gather_metric_with_nan_samples(self, mock_query):
+        """Test aggregation when some samples return NaN"""
+        # Mock returns mixed valid and NaN values
+        mock_query.side_effect = [
+            {'resultType': 'scalar', 'result': [1234567890, 'NaN']},
+            {'resultType': 'scalar', 'result': [1234567890, '100.0']},
+            {'resultType': 'scalar', 'result': [1234567890, '200.0']},
+        ]
+
+        prom_conn = MagicMock()
+
+        recon_config = {
+            'service': 'prometheus',
+            'query': 'rate(metric[5m])',
+            'stabilization_seconds': 0,
+            'samples': 3,
+            'interval': 0,
+            'aggregation': 'median'
+        }
+
+        result = _gather_single_metric(prom_conn, 'test_metric', recon_config)
+
+        # Should filter out NaN and aggregate remaining values
+        # Median of [100.0, 200.0] = 150.0
+        assert result == 150.0
+
+    @patch('reconnaissance.prometheus.prometheus_query_with_retry')
+    def test_gather_metric_all_nan_returns_inf(self, mock_query):
+        """Test that all-NaN samples return infinity"""
+        mock_query.return_value = {
+            'resultType': 'scalar',
+            'result': [1234567890, 'NaN']
+        }
+
+        prom_conn = MagicMock()
+
+        recon_config = {
+            'service': 'prometheus',
+            'query': 'rate(metric[5m])',
+            'stabilization_seconds': 0,
+            'samples': 3,
+            'interval': 0,
+            'aggregation': 'median'
+        }
+
+        result = _gather_single_metric(prom_conn, 'test_metric', recon_config)
+
+        # All NaN should return infinity
+        assert result == float('inf')
+
+    @patch('reconnaissance.prometheus.prometheus_query_with_retry')
+    def test_gather_metric_query_failure(self, mock_query):
+        """Test that query failures return infinity"""
+        mock_query.side_effect = Exception("Connection error")
+
+        prom_conn = MagicMock()
+
+        recon_config = {
+            'service': 'prometheus',
+            'query': 'rate(metric[5m])',
+            'stabilization_seconds': 0,
+            'samples': 1,
+            'interval': 0,
+            'aggregation': 'median'
+        }
+
+        result = _gather_single_metric(prom_conn, 'test_metric', recon_config)
+
+        # Failed queries should return infinity
+        assert result == float('inf')
+
+    @patch('reconnaissance.prometheus.prometheus_query_with_retry')
+    def test_gather_metric_unsupported_service(self, mock_query):
+        """Test that unsupported reconnaissance service returns infinity"""
+        prom_conn = MagicMock()
+
+        recon_config = {
+            'service': 'unsupported_service',
+            'query': 'some query'
+        }
+
+        result = _gather_single_metric(prom_conn, 'test_metric', recon_config)
+
+        # Unsupported service should return infinity
+        assert result == float('inf')
+        # Query should not be called for unsupported service
+        mock_query.assert_not_called()

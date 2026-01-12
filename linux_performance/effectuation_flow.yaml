@@ -14,7 +14,7 @@
 # GNU Affero General Public License for more details.
 #
 # You should have received a copy of the GNU Affero General Public License
-# along with this godon. If not, see <http://www.gnu.org/licenses/>.
+# along with this godon.  If not, see <http://www.gnu.org/licenses/>.
 #
 
 summary: "Linux Performance Effectuation Flow"
@@ -32,11 +32,11 @@ value:
             expr: flow_input.targets
           playbook_path:
             type: static
-            value: "f/breeder/linux_performance/sysctl_tasks"
+            value: "f/breeder/linux_performance/effectuate_settings"
           playbook_vars:
             type: javascript
             expr: "flow_input.params"
-    
+
     - id: gather_metrics
       value:
         path: f/reconnaissance/prometheus

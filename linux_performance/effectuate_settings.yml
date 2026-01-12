@@ -1,0 +1,164 @@
+---
+# Comprehensive parameter effectuation playbook
+# Handles sysctl, sysfs, cpufreq, and ethtool parameters
+# Categorizes raw params dict using Jinja2 logic
+inventory:
+  all_children:
+    targets:
+      hosts:
+        "{{ target_hostname }}":
+          ansible_host: "{{ target_hostname }}"
+          ansible_user: "{{ username }}"
+          ansible_ssh_private_key_file: ./ssh_key
+          ansible_ssh_common_args: '-o StrictHostKeyChecking=new'
+
+files:
+  - variable: "{{ ssh_key_variable }}"
+    target: ./ssh_key
+    mode: '0600'
+
+extra_vars:
+  target_hostname:
+    type: string
+  username:
+    type: string
+    default: root
+  ssh_key_variable:
+    type: string
+  # Raw parameters dict (will be categorized in playbook)
+  params:
+    type: object
+
+dependencies:
+  python:
+    - jmespath
+
+---
+- name: Categorize parameters by type
+  hosts: localhost
+  connection: local
+  tasks:
+    - name: Separate parameters into categories
+      set_fact:
+        # Sysctl parameters (net.*, kernel.*, vm.*, fs.*)
+        sysctl_params: >-
+          {% set sysctl_dict = {} %}
+          {% for key, value in params.items() %}
+          {%   if key.startswith('net.') or key.startswith('kernel.') or key.startswith('vm.') or key.startswith('fs.') or key.startswith('dev.') %}
+          {%     set _ = sysctl_dict.update({key: value | string}) %}
+          {%   endif %}
+          {% endfor %}
+          {{ sysctl_dict }}
+
+        # Sysfs parameters (known sysfs paths)
+        sysfs_params: >-
+          {% set sysfs_keys = ['cpu_governor', 'transparent_hugepage', 'qdisc'] %}
+          {% set sysfs_paths = {
+            'cpu_governor': '/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor',
+            'transparent_hugepage': '/sys/kernel/mm/transparent_hugepage/enabled',
+            'qdisc': '/sys/class/net/eth0/queue/disc'
+          } %}
+          {% set sysfs_dict = {} %}
+          {% for key in sysfs_keys %}
+          {%   if key in params %}
+          {%     set _ = sysfs_dict.update({key: {'path': sysfs_paths[key], 'value': params[key] | string}}) %}
+          {%   endif %}
+          {% endfor %}
+          {{ sysfs_dict }}
+
+        # Cpufreq parameters
+        cpufreq_params: >-
+          {% set cpufreq_keys = ['governor', 'min_freq_ghz', 'max_freq_ghz'] %}
+          {% set cpufreq_dict = {} %}
+          {% for key in cpufreq_keys %}
+          {%   if key in params %}
+          {%     set _ = cpufreq_dict.update({key: params[key]}) %}
+          {%   endif %}
+          {% endfor %}
+          {{ cpufreq_dict }}
+
+        # Ethtool parameters (interface-prefixed keys like "eth0_tso")
+        ethtool_params: >-
+          {% set ethtool_dict = {} %}
+          {% for key, value in params.items() %}
+          {%   if '_' in key %}
+          {%     set parts = key.split('_') %}
+          {%     set interface = parts[0] %}
+          {%     set param = parts[1:] | join('_') %}
+          {%     if param in ['tso', 'gro', 'rx_ring', 'tx_ring'] %}
+          {%       set _ = ethtool_dict.update({key: {'interface': interface, 'param': param, 'value': value | string}}) %}
+          {%     endif %}
+          {%   endif %}
+          {% endfor %}
+          {{ ethtool_dict }}
+
+---
+- name: Apply Linux performance parameters
+  hosts: targets
+  become: yes
+  tasks:
+    - name: Apply sysctl parameters
+      sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        state: present
+        reload: yes
+      loop: "{{ sysctl_params | dict2items }}"
+      register: sysctl_result
+      when: sysctl_params | length > 0
+
+    - name: Apply sysfs parameters (filesystem paths)
+      copy:
+        dest: "{{ item.value.path }}"
+        content: "{{ item.value.value }}"
+        mode: '0644'
+      loop: "{{ sysfs_params | dict2items }}"
+      register: sysfs_result
+      when: sysfs_params | length > 0
+
+    - name: Apply cpufreq parameters (CPU frequency scaling)
+      shell: |
+        {% if item.key == 'governor' %}
+        cpufreq-set -g {{ item.value }}
+        {% elif item.key == 'min_freq_ghz' %}
+        cpufreq-set -d {{ (item.value | float * 1000000) | int }}
+        {% elif item.key == 'max_freq_ghz' %}
+        cpufreq-set -u {{ (item.value | float * 1000000) | int }}
+        {% endif %}
+      loop: "{{ cpufreq_params | dict2items }}"
+      register: cpufreq_result
+      when: cpufreq_params | length > 0
+      ignore_errors: yes  # cpufreq-set may not be available on all systems
+
+    - name: Apply ethtool parameters (network interface settings)
+      shell: |
+        {% if item.value.param == 'tso' %}
+        ethtool -K {{ item.value.interface }} tso {{ item.value.value }}
+        {% elif item.value.param == 'gro' %}
+        ethtool -K {{ item.value.interface }} gro {{ item.value.value }}
+        {% elif item.value.param == 'rx_ring' %}
+        ethtool -G {{ item.value.interface }} rx {{ item.value.value }}
+        {% elif item.value.param == 'tx_ring' %}
+        ethtool -G {{ item.value.interface }} tx {{ item.value.value }}
+        {% endif %}
+      loop: "{{ ethtool_params | dict2items }}"
+      register: ethtool_result
+      when: ethtool_params | length > 0
+      ignore_errors: yes  # ethtool may not support all options on all interfaces
+
+    - name: Gather all applied parameters
+      set_fact:
+        all_applied: []
+        all_applied: >
+          {{ all_applied +
+             (sysctl_result.results | selectattr('changed', 'equalto', true) | map(attribute='item') | list | map('regex_replace', '^(.*)$', 'sysctl.\\1') | list) if sysctl_params | length > 0 else [] +
+             (sysfs_params.keys() | list if sysfs_params | length > 0 else [] | map('regex_replace', '^(.*)$', 'sysfs.\\1') | list) +
+             (cpufreq_params.keys() | list if cpufreq_params | length > 0 else [] | map('regex_replace', '^(.*)$', 'cpufreq.\\1') | list) +
+             (ethtool_params.keys() | list if ethtool_params | length > 0 else [] | map('regex_replace', '^(.*)$', 'ethtool.\\1') | list)
+          }}
+
+    - name: Return success result
+      delegate_to: localhost
+      copy:
+        content: "{{ { 'success': true, 'hostname': target_hostname, 'applied_count': all_applied | length, 'applied_params': all_applied } | to_json }}"
+        dest: result.json
