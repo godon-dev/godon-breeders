@@ -117,97 +117,126 @@ def prometheus_query_with_retry(prom_conn, query: str, max_retries: int = 3, ini
 def main(config: Dict[str, Any], targets: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Gather metrics from Prometheus for linux_performance breeder
-    
+
+    v0.3: Collects metrics for both objectives (what we optimize) and guardrails (safety limits)
+
     Args:
-        config: Breeder configuration with objectives and reconnaissance settings
+        config: Breeder configuration with objectives, guardrails, and reconnaissance settings
         targets: List of target systems (unused for Prometheus, but kept for interface consistency)
-    
+
     Returns:
-        Dictionary with metrics for each objective (tcp_rtt, tcp_delivery_rate_bytes, etc.)
+        Dictionary with metrics for each objective and guardrail
     """
     logger.info("Starting network reconnaissance via Prometheus")
-    
+
     # Get Prometheus URL from Windmill resources
     prometheus_url = wmill.get_resource('u/user/prometheus')
     logger.info(f"Connecting to Prometheus: {prometheus_url}")
-    
+
     # Create Prometheus connection
     prom_conn = PrometheusConnect(
         url=prometheus_url,
         retry=urllib3.util.retry.Retry(total=3, raise_on_status=True, backoff_factor=0.5),
         disable_ssl=True
     )
-    
+
     metric_data = {}
-    
+
+    # v0.3: Collect metrics for objectives (what we optimize)
     for objective in config.get('objectives', []):
         objective_name = objective.get('name')
-        logger.info(f"Gathering metric: {objective_name}")
-        
+        logger.info(f"Gathering objective metric: {objective_name}")
+
         recon_config = objective.get('reconnaissance', {})
-        recon_service = recon_config.get('service')
-        
-        if recon_service == 'prometheus':
-            try:
-                recon_query = recon_config.get('query')
-                
-                # Get stabilization and sampling configuration
-                stabilization_seconds = recon_config.get('stabilization_seconds', 120)
-                samples = recon_config.get('samples', 1)
-                interval = recon_config.get('interval', 0)
-                
-                # Wait for system stabilization after parameter changes
-                logger.info(f"Waiting {stabilization_seconds}s for network stabilization")
-                time.sleep(stabilization_seconds)
-                logger.info("Stabilization period completed")
-                
-                logger.info(f"Collecting {samples} samples with {interval}s interval")
-                logger.debug(f"Executing Prometheus query: {recon_query}")
-                
-                sample_values = []
-                
-                for i in range(samples):
-                    query_result = prometheus_query_with_retry(prom_conn, recon_query)
-                    
-                    if query_result.get('resultType') != 'scalar':
-                        raise ValueError(f"Query must return scalar result, got: {query_result.get('resultType')}")
-                    
-                    value = extract_scalar_value(query_result)
-                    sample_values.append(value)
-                    
-                    if value is not None:
-                        logger.debug(f"Sample {i+1}/{samples}: {value}")
-                    else:
-                        logger.debug(f"Sample {i+1}/{samples}: NaN")
-                    
-                    # Wait between samples (but not after the last one)
-                    if i < samples - 1 and interval > 0:
-                        time.sleep(interval)
-                
-                # Get aggregation method
-                aggregation_method = recon_config.get('aggregation', 'median')
-                
-                # Aggregate samples
-                final_value = aggregate_samples(sample_values, aggregation_method)
-                
-                if final_value == float('inf'):
-                    logger.warning(f"All samples returned NaN for {objective_name}")
-                    metric_data[objective_name] = final_value
-                else:
-                    metric_data[objective_name] = final_value
-                    logger.info(f"Metric {objective_name}: {final_value} (using {aggregation_method} of {len([s for s in sample_values if s is not None])} samples)")
-                    
-            except Exception as e:
-                logger.error(f"Failed to gather metric {objective_name}: {e}")
-                metric_data[objective_name] = float('inf')
-                
-        else:
-            logger.error(f"Unsupported reconnaissance service: {recon_service}")
-            metric_data[objective_name] = float('inf')
-    
+        value = _gather_single_metric(prom_conn, objective_name, recon_config)
+        metric_data[objective_name] = value
+
+    # v0.3: Collect metrics for guardrails (safety limits)
+    for guardrail in config.get('guardrails', []):
+        guardrail_name = guardrail.get('name')
+        logger.info(f"Gathering guardrail metric: {guardrail_name}")
+
+        recon_config = guardrail.get('reconnaissance', {})
+        value = _gather_single_metric(prom_conn, guardrail_name, recon_config)
+        metric_data[guardrail_name] = value
+
     logger.info(f"Reconnaissance completed with {len(metric_data)} metrics")
-    
+
     return {
         'status': 'completed',
         'metrics': metric_data
     }
+
+
+def _gather_single_metric(prom_conn, metric_name: str, recon_config: Dict[str, Any]) -> float:
+    """
+    Gather a single metric from Prometheus
+
+    Args:
+        prom_conn: Prometheus connection object
+        metric_name: Name of the metric (for logging)
+        recon_config: Reconnaissance configuration (query, samples, interval, etc.)
+
+    Returns:
+        Metric value (float, or float('inf') if collection failed)
+    """
+    recon_service = recon_config.get('service')
+
+    if recon_service == 'prometheus':
+        try:
+            recon_query = recon_config.get('query')
+
+            # Get stabilization and sampling configuration
+            stabilization_seconds = recon_config.get('stabilization_seconds', 120)
+            samples = recon_config.get('samples', 1)
+            interval = recon_config.get('interval', 0)
+
+            # Wait for system stabilization after parameter changes
+            if stabilization_seconds > 0:
+                logger.info(f"Waiting {stabilization_seconds}s for network stabilization")
+                time.sleep(stabilization_seconds)
+                logger.info("Stabilization period completed")
+
+            logger.info(f"Collecting {samples} samples with {interval}s interval")
+            logger.debug(f"Executing Prometheus query: {recon_query}")
+
+            sample_values = []
+
+            for i in range(samples):
+                query_result = prometheus_query_with_retry(prom_conn, recon_query)
+
+                if query_result.get('resultType') != 'scalar':
+                    raise ValueError(f"Query must return scalar result, got: {query_result.get('resultType')}")
+
+                value = extract_scalar_value(query_result)
+                sample_values.append(value)
+
+                if value is not None:
+                    logger.debug(f"Sample {i+1}/{samples}: {value}")
+                else:
+                    logger.debug(f"Sample {i+1}/{samples}: NaN")
+
+                # Wait between samples (but not after the last one)
+                if i < samples - 1 and interval > 0:
+                    time.sleep(interval)
+
+            # Get aggregation method
+            aggregation_method = recon_config.get('aggregation', 'median')
+
+            # Aggregate samples
+            final_value = aggregate_samples(sample_values, aggregation_method)
+
+            if final_value == float('inf'):
+                logger.warning(f"All samples returned NaN for {metric_name}")
+                return final_value
+            else:
+                logger.info(f"Metric {metric_name}: {final_value} (using {aggregation_method} of {len([s for s in sample_values if s is not None])} samples)")
+                return final_value
+
+        except Exception as e:
+            logger.error(f"Failed to gather metric {metric_name}: {e}")
+            return float('inf')
+
+    else:
+        logger.error(f"Unsupported reconnaissance service: {recon_service}")
+        return float('inf')

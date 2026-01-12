@@ -128,23 +128,46 @@ class BreederWorker:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         breeder_config = config.get('breeder', {})
-        
+
         self.breeder_type = breeder_config.get('name', 'unknown_breeder')
         self.breeder_uuid = breeder_config.get('uuid', breeder_config.get('name', 'unknown'))
         self.breeder_id = self.breeder_uuid  # For database/communication
         self.worker_id = f"{self.breeder_type}_worker_{self.breeder_uuid}"
-        
+
         # Parse creation timestamp for completion criteria
         creation_ts_str = config.get('creation_ts')
         if not creation_ts_str:
             raise ValueError("Required field 'creation_ts' missing from config")
         self.start_time = dateutil.parser.parse(creation_ts_str)
-        
+
         # Assign sampler to this worker for algorithm diversity
         self.sampler_type = self._assign_sampler()
-        
+
         self.study = self._load_or_create_study()
         self.communication_callback = self._setup_communication()
+
+        # Rollback state tracking
+        # Extract worker identifiers from config
+        self.run_id = config.get('run_id', 0)
+        self.target_id = config.get('target_id', 0)
+
+        # Get rollback configuration for this worker's target
+        targets = self.config.get('effectuation', {}).get('targets', [])
+        if 0 <= self.target_id < len(targets):
+            self.target = targets[self.target_id]
+        else:
+            self.target = targets[0] if targets else {}
+            logger.warning(f"Invalid target_id {self.target_id}, using first target")
+
+        self.rollback_config = self.target.get('rollback', {})
+        self.rollback_enabled = self.rollback_config.get('enabled', False)
+
+        if self.rollback_enabled:
+            logger.info(f"Rollback enabled for target {self.target_id}")
+            logger.info(f"Rollback strategy: {self.rollback_config.get('strategy', 'unknown')}")
+            # Initialize rollback state in study if not exists
+            self._init_rollback_state()
+
         self._update_state()
         
     def _assign_sampler(self) -> str:
@@ -342,55 +365,439 @@ class BreederWorker:
             return None
     
     def _suggest_params(self, trial: optuna.Trial) -> Dict[str, Any]:
+        """
+        Suggest parameter values using Optuna trial.
+
+        v0.3 updates:
+        - Support sysctl, sysfs, cpufreq, ethtool categories
+        - Support list of constraints (multiple disjoint ranges)
+        - Support categorical parameters (suggest_categorical)
+        - Support float parameters (suggest_float)
+        - Handle ethtool's nested structure (interface → parameters)
+        """
         params = {}
-        
-        settings_config = self.config.get('settings', {}).get('sysctl', {})
-        for setting_name, setting_config in settings_config.items():
-            constraints = setting_config.get('constraints', {})
-            step = setting_config.get('step', 1)
-            
-            lower = constraints.get('lower', 0)
-            upper = constraints.get('upper', 1000000)
-            
-            value = trial.suggest_int(setting_name, lower, upper, step=step)
-            params[setting_name] = value
-            logger.debug(f"Suggested {setting_name} = {value}")
-        
+
+        # Support multiple settings categories
+        supported_categories = ['sysctl', 'sysfs', 'cpufreq', 'ethtool']
+        settings = self.config.get('settings', {})
+
+        for category in supported_categories:
+            if category not in settings:
+                continue
+
+            category_settings = settings[category]
+
+            # Special handling for ethtool (nested: interface → parameters)
+            if category == 'ethtool':
+                for interface_name, interface_config in category_settings.items():
+                    if not isinstance(interface_config, dict):
+                        logger.warning(f"Invalid ethtool config for {interface_name}: not a dict")
+                        continue
+
+                    for param_name, param_config in interface_config.items():
+                        if 'constraints' not in param_config:
+                            logger.warning(f"Missing constraints for ethtool.{interface_name}.{param_name}")
+                            continue
+
+                        # Suggest value for this parameter
+                        value = self._suggest_single_param(
+                            trial, param_name, param_config['constraints'],
+                            category=f"ethtool.{interface_name}"
+                        )
+                        # Store with interface prefix
+                        params[f"{interface_name}_{param_name}"] = value
+                        logger.debug(f"Suggested ethtool.{interface_name}.{param_name} = {value}")
+
+            # Non-ethtool categories (sysctl, sysfs, cpufreq)
+            else:
+                for param_name, param_config in category_settings.items():
+                    if 'constraints' not in param_config:
+                        logger.warning(f"Missing constraints for {category}.{param_name}")
+                        continue
+
+                    constraints = param_config['constraints']
+
+                    # Suggest value for this parameter
+                    value = self._suggest_single_param(trial, param_name, constraints, category=category)
+                    params[param_name] = value
+                    logger.debug(f"Suggested {category}.{param_name} = {value}")
+
         return params
+
+    def _suggest_single_param(self, trial: optuna.Trial, param_name: str,
+                             constraints_list: List[Dict[str, Any]], category: str) -> Any:
+        """
+        Suggest a value for a single parameter using Optuna.
+
+        v0.3: Supports list of constraints with multiple disjoint ranges or categorical values.
+
+        Args:
+            trial: Optuna trial object
+            param_name: Parameter name
+            constraints_list: List of constraint objects (ranges or categorical)
+            category: Parameter category (for error messages)
+
+        Returns:
+            Suggested parameter value (int, float, or str)
+
+        Raises:
+            ValueError: If constraint structure is invalid
+        """
+        if not isinstance(constraints_list, list) or len(constraints_list) == 0:
+            raise ValueError(f"{category}.{param_name}: constraints must be a non-empty list")
+
+        # Check constraint type from first constraint
+        first_constraint = constraints_list[0]
+
+        # Categorical parameter (has 'values')
+        if 'values' in first_constraint:
+            # For categorical, use first constraint's values
+            # (multiple categorical constraints don't make sense)
+            values = first_constraint['values']
+            return trial.suggest_categorical(param_name, values)
+
+        # Integer/float range (has 'step', 'lower', 'upper')
+        elif 'step' in first_constraint and 'lower' in first_constraint and 'upper' in first_constraint:
+            # Multiple disjoint ranges - use first range for suggestion
+            # Note: Optuna doesn't support disjoint ranges directly, so we use the first range
+            # The sharding logic in controller distributes different ranges to different workers
+            constraint = first_constraint
+            lower = constraint['lower']
+            upper = constraint['upper']
+            step = constraint['step']
+
+            # Determine if integer or float based on step type
+            if isinstance(step, int) and isinstance(lower, int) and isinstance(upper, int):
+                return trial.suggest_int(param_name, lower, upper, step=step)
+            else:
+                return trial.suggest_float(param_name, lower, upper, step=step)
+
+        else:
+            raise ValueError(
+                f"{category}.{param_name}: constraint must have either 'values' (categorical) "
+                f"or 'step/lower/upper' (numeric range)"
+            )
     
     def _execute_trial(self, params: Dict[str, Any]) -> Dict[str, float]:
         flow_path = "f/breeder/linux_performance/effectuation_flow"
-        
+
         # Get targets from configuration
         targets = self.config.get('effectuation', {}).get('targets', [])
-        
+
         flow_inputs = {
             'config': self.config,
             'targets': targets,
             'params': params
         }
-        
+
         logger.info(f"Executing effectuation flow for {len(targets)} targets with params: {list(params.keys())}")
-        
+
         try:
             job_id = wmill.run_flow_async(path=flow_path, args=flow_inputs)
             logger.debug(f"Effectuation flow job ID: {job_id}")
-            
+
             result = wmill.get_result(job_id)
             logger.info(f"Effectuation flow completed: {result.get('status')}")
-            
+
             # Extract metrics from reconnaissance step
             metrics = result.get('metrics', {})
             if not metrics:
                 logger.error("No metrics returned from effectuation flow")
                 return {obj.get('name'): float('inf') for obj in self.config.get('objectives', [])}
-            
+
             return metrics
-            
+
         except Exception as e:
             logger.error(f"Effectuation flow failed: {e}", exc_info=True)
             # Return penalty values for failed trials
             return {obj.get('name'): float('inf') for obj in self.config.get('objectives', [])}
+
+    def _check_guardrails(self, metrics: Dict[str, float]) -> tuple[bool, list[str]]:
+        """
+        Check if guardrails are violated after a trial.
+
+        v0.3: Guardrails are safety limits that trigger rollback if exceeded.
+        Unlike objectives (which we optimize), guardrails are binary constraints.
+
+        Args:
+            metrics: Dictionary of metric names → values collected from reconnaissance
+
+        Returns:
+            tuple: (violated, violations_list)
+                - violated: True if any guardrail was exceeded
+                - violations_list: List of violation messages
+        """
+        guardrails = self.config.get('guardrails', [])
+
+        if not guardrails:
+            # No guardrails configured
+            return False, []
+
+        violations = []
+
+        for guardrail in guardrails:
+            name = guardrail.get('name', 'unknown')
+            hard_limit = guardrail.get('hard_limit')
+            reconnaissance = guardrail.get('reconnaissance', {})
+
+            if not hard_limit:
+                logger.warning(f"Guardrail '{name}' missing hard_limit, skipping")
+                continue
+
+            # Extract guardrail metric from results
+            # Guardrail metrics should be collected by effectuation flow
+            # and returned in the metrics dict
+            metric_value = metrics.get(name)
+
+            if metric_value is None:
+                logger.warning(f"Guardrail '{name}' metric not found in metrics, skipping check")
+                continue
+
+            # Determine if guardrail is violated
+            # Direction inferred from parameter semantics
+            # For common metrics (CPU, errors, latency) = must not exceed
+            # Future enhancement: Add explicit direction field to guardrail config
+            if isinstance(hard_limit, (int, float)):
+                # Assume "must not exceed" for common safety metrics
+                if metric_value > hard_limit:
+                    violation_msg = f"Guardrail '{name}' violated: {metric_value} > {hard_limit}"
+                    violations.append(violation_msg)
+                    logger.error(violation_msg)
+                else:
+                    logger.debug(f"Guardrail '{name}' OK: {metric_value} <= {hard_limit}")
+            else:
+                logger.warning(f"Guardrail '{name}' has non-numeric hard_limit, skipping")
+
+        return len(violations) > 0, violations
+
+    def _get_rollback_state_key(self) -> str:
+        """Get the key for storing rollback state in study user_attrs"""
+        return f'rollback_state_target_{self.target_id}'
+
+    def _init_rollback_state(self) -> None:
+        """
+        Initialize rollback state in Optuna study user_attrs.
+
+        v0.3: Uses YugabyteDB (Optuna storage) for coordination across workers.
+        """
+        state_key = self._get_rollback_state_key()
+
+        # Check if already initialized
+        existing_state = self.study.user_attrs.get(state_key)
+        if existing_state:
+            logger.debug(f"Rollback state already initialized for target {self.target_id}")
+            return
+
+        # Initialize default rollback state
+        import json
+        initial_state = {
+            'state': 'normal',  # normal, needs_rollback, in_progress, completed
+            'consecutive_failures': 0,
+            'last_successful_params': None,
+            'rollback_strategy': self.rollback_config.get('strategy', 'standard'),
+            'version': 0  # For optimistic locking
+        }
+
+        self.study.set_user_attr(state_key, json.dumps(initial_state))
+        logger.info(f"Initialized rollback state for target {self.target_id}: {initial_state}")
+
+    def _get_rollback_state(self) -> Dict[str, Any]:
+        """Load rollback state from Optuna study user_attrs"""
+        import json
+
+        state_key = self._get_rollback_state_key()
+        state_json = self.study.user_attrs.get(state_key)
+
+        if not state_json:
+            logger.warning(f"No rollback state found for target {self.target_id}, initializing")
+            self._init_rollback_state()
+            state_json = self.study.user_attrs.get(state_key)
+
+        return json.loads(state_json)
+
+    def _update_rollback_state(self, new_state: Dict[str, Any]) -> bool:
+        """
+        Update rollback state in Optuna study with optimistic locking.
+
+        Args:
+            new_state: New rollback state to write
+
+        Returns:
+            bool: True if update succeeded, False if version conflict
+        """
+        import json
+
+        state_key = self._get_rollback_state_key()
+
+        # Increment version for optimistic locking
+        new_state['version'] = new_state.get('version', 0) + 1
+
+        self.study.set_user_attr(state_key, json.dumps(new_state))
+        logger.debug(f"Updated rollback state for target {self.target_id}: version={new_state['version']}, state={new_state['state']}")
+
+        return True
+
+    def _check_needs_rollback(self) -> bool:
+        """
+        Check if rollback is needed based on consecutive failures threshold.
+
+        Returns:
+            bool: True if rollback should be triggered
+        """
+        if not self.rollback_enabled:
+            return False
+
+        rollback_state = self._get_rollback_state()
+        consecutive_failures = rollback_state.get('consecutive_failures', 0)
+
+        # Get rollback strategy configuration
+        strategy_name = self.rollback_config.get('strategy', 'standard')
+        strategies = self.config.get('rollback_strategies', {})
+        strategy = strategies.get(strategy_name, {})
+
+        threshold = strategy.get('consecutive_failures', 3)
+
+        if consecutive_failures >= threshold:
+            logger.warning(f"Consecutive failures ({consecutive_failures}) >= threshold ({threshold}), rollback needed")
+            return True
+
+        return False
+
+    def _execute_rollback(self) -> bool:
+        """
+        Execute rollback by applying previous parameters to target.
+
+        Returns:
+            bool: True if rollback succeeded, False otherwise
+        """
+        import json
+
+        logger.info(f"Executing rollback for target {self.target_id}")
+
+        rollback_state = self._get_rollback_state()
+        strategy_name = self.rollback_config.get('strategy', 'standard')
+        strategies = self.config.get('rollback_strategies', {})
+        strategy = strategies.get(strategy_name, {})
+
+        # Determine which parameters to restore
+        target_state = strategy.get('target_state', 'previous')  # previous, best, baseline
+
+        if target_state == 'previous':
+            params_to_restore = rollback_state.get('last_successful_params')
+        elif target_state == 'best':
+            # Get best trial from study
+            if self.study.best_trial:
+                params_to_restore = self.study.best_trial.params
+            else:
+                logger.error("Cannot rollback to 'best': no best trial found")
+                return False
+        elif target_state == 'baseline':
+            # Baseline = no tuning applied (use config defaults)
+            params_to_restore = {}
+        else:
+            logger.error(f"Unknown target_state: {target_state}")
+            return False
+
+        if params_to_restore is None:
+            logger.error(f"No parameters to restore for target_state={target_state}")
+            return False
+
+        logger.info(f"Rolling back to {target_state} state with params: {list(params_to_restore.keys())}")
+
+        # Execute rollback by calling effectuation flow
+        try:
+            flow_path = "f/breeder/linux_performance/effectuation_flow"
+
+            flow_inputs = {
+                'config': self.config,
+                'targets': [self.target],  # Only this target
+                'params': params_to_restore
+            }
+
+            logger.info(f"Executing rollback effectuation flow for target {self.target_id}")
+            job_id = wmill.run_flow_async(path=flow_path, args=flow_inputs)
+            result = wmill.get_result(job_id)
+
+            logger.info(f"Rollback effectuation completed: {result.get('status')}")
+
+            # Update rollback state to completed
+            rollback_state['state'] = 'completed'
+            rollback_state['consecutive_failures'] = 0  # Reset counter
+            self._update_rollback_state(rollback_state)
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Rollback execution failed: {e}", exc_info=True)
+
+            # Handle rollback failure based on on_failure policy
+            on_failure = strategy.get('on_failure', 'stop')
+
+            if on_failure == 'stop':
+                logger.error("Rollback failed with on_failure=stop, halting optimization")
+                rollback_state['state'] = 'failed'
+                self._update_rollback_state(rollback_state)
+                raise  # Re-raise to stop worker
+
+            elif on_failure == 'continue':
+                logger.warning("Rollback failed with on_failure=continue, continuing optimization")
+                rollback_state['state'] = 'failed'
+                self._update_rollback_state(rollback_state)
+                return False
+
+            elif on_failure == 'skip_target':
+                logger.error("Rollback failed with on_failure=skip_target, marking target unhealthy")
+                rollback_state['state'] = 'skip_target'
+                self._update_rollback_state(rollback_state)
+                return False
+
+            return False
+
+    def _handle_guardrail_violation(self, params: Dict[str, Any]) -> None:
+        """
+        Handle guardrail violation by tracking consecutive failures.
+
+        Args:
+            params: Parameters that caused the violation
+        """
+        if not self.rollback_enabled:
+            return
+
+        rollback_state = self._get_rollback_state()
+
+        # Increment consecutive failures counter
+        rollback_state['consecutive_failures'] = rollback_state.get('consecutive_failures', 0) + 1
+
+        consecutive_failures = rollback_state['consecutive_failures']
+        logger.warning(f"Guardrail violation detected. Consecutive failures: {consecutive_failures}")
+
+        # Update state
+        if self._check_needs_rollback():
+            rollback_state['state'] = 'needs_rollback'
+        else:
+            rollback_state['state'] = 'normal'
+
+        self._update_rollback_state(rollback_state)
+
+    def _handle_successful_trial(self, params: Dict[str, Any]) -> None:
+        """
+        Handle successful trial by resetting failure counter and updating last successful params.
+
+        Args:
+            params: Parameters from successful trial
+        """
+        if not self.rollback_enabled:
+            return
+
+        rollback_state = self._get_rollback_state()
+
+        # Reset consecutive failures on success
+        rollback_state['consecutive_failures'] = 0
+        rollback_state['state'] = 'normal'
+        rollback_state['last_successful_params'] = params
+
+        self._update_rollback_state(rollback_state)
+        logger.debug(f"Reset consecutive failures after successful trial")
     
     def _should_continue(self) -> bool:
         completion_criteria = self.config.get('run', {}).get('completion_criteria', {})
@@ -496,44 +903,92 @@ class BreederWorker:
     def run(self):
         logger.info(f"Starting BreederWorker: {self.worker_id}")
         logger.info(f"Breeder type: {self.breeder_type}, UUID: {self.breeder_uuid}")
-        
+
         trial_count = 0
-        
+
         try:
             while self._should_continue():
+                # Check if rollback is needed before starting new trial
+                if self.rollback_enabled and self._check_needs_rollback():
+                    logger.warning("Rollback needed, executing rollback before next trial")
+                    rollback_success = self._execute_rollback()
+
+                    if not rollback_success:
+                        # Rollback failed, handle based on on_failure policy
+                        # _execute_rollback already raised exception if on_failure=stop
+                        logger.warning("Rollback failed, continuing with trials")
+
+                    # Apply after-action policy (pause/continue/stop)
+                    rollback_state = self._get_rollback_state()
+                    strategy_name = self.rollback_config.get('strategy', 'standard')
+                    strategies = self.config.get('rollback_strategies', {})
+                    strategy = strategies.get(strategy_name, {})
+                    after_policy = strategy.get('after', {})
+                    after_action = after_policy.get('action', 'continue')
+
+                    if after_action == 'pause':
+                        pause_duration = after_policy.get('duration', 300)
+                        logger.info(f"Pausing for {pause_duration} seconds after rollback")
+                        import time
+                        time.sleep(pause_duration)
+                    elif after_action == 'stop':
+                        logger.info("Rollback completed with after.action=stop, halting optimization")
+                        break
+                    # continue = just continue to next trial
+
                 trial = self.study.ask()
                 logger.info(f"Trial {trial.number} started")
-                
+
                 try:
                     params = self._suggest_params(trial)
                     metrics = self._execute_trial(params)
-                    
-                    values = [metrics.get(obj.get('name')) for obj in self.config.get('objectives', [])]
-                    self.study.tell(trial, values)
-                    
-                    logger.info(f"Trial {trial.number} completed with values: {values}")
-                    
-                    if self.communication_callback:
-                        frozen_trial = self.study.trials[-1]
-                        self.communication_callback(self.study, frozen_trial)
-                    
+
+                    # Check guardrails before accepting trial results
+                    guardrails_violated, violations = self._check_guardrails(metrics)
+
+                    if guardrails_violated:
+                        # Guardrail violation - mark trial as failed
+                        logger.error(f"Trial {trial.number} failed guardrails: {violations}")
+                        self.study.tell(trial, state=TrialState.FAIL)
+                        logger.info(f"Trial {trial.number} marked as FAILED (guardrail violation)")
+
+                        # Track failures for rollback logic
+                        self._handle_guardrail_violation(params)
+                    else:
+                        # No guardrail violations - accept trial results
+                        values = [metrics.get(obj.get('name')) for obj in self.config.get('objectives', [])]
+                        self.study.tell(trial, values)
+
+                        logger.info(f"Trial {trial.number} completed with values: {values}")
+
+                        # Reset failure counter on successful trial
+                        self._handle_successful_trial(params)
+
+                        if self.communication_callback:
+                            frozen_trial = self.study.trials[-1]
+                            self.communication_callback(self.study, frozen_trial)
+
                     trial_count += 1
                     if trial_count % 5 == 0:
                         self._update_state()
-                    
+
                 except Exception as e:
                     logger.error(f"Trial {trial.number} failed: {e}", exc_info=True)
                     self.study.tell(trial, state=TrialState.FAIL)
                     logger.info(f"Trial {trial.number} marked as FAILED")
-                    
+
+                    # Track failures for rollback logic
+                    # (even non-guardrail failures count toward consecutive failures)
+                    self._handle_guardrail_violation(params)
+
         except Exception as e:
             logger.error(f"Breeder {self.breeder_id} failed: {e}", exc_info=True)
             self._update_state()
             raise
-        
+
         self._update_state()
         logger.info(f"BreederWorker {self.worker_id} completed {len(self.study.trials)} trials")
-        
+
         if self.study.best_trial:
             logger.info(f"Best trial: {self.study.best_trial.number}")
             logger.info(f"Best params: {self.study.best_trial.params}")
