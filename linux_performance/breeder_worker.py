@@ -25,10 +25,12 @@ import random
 import hashlib
 import datetime
 import dateutil.parser
+import time
 from typing import Dict, Any, Optional, List
 from optuna.trial import TrialState
 from optuna.samplers import TPESampler, NSGAIISampler, NSGAIIISampler, RandomSampler, QMCSampler
 from scipy.stats import percentileofscore
+from linux_performance.breeder_metrics_client import BreederMetricsClient
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -169,6 +171,13 @@ class BreederWorker:
             self._init_rollback_state()
 
         self._update_state()
+
+        # Initialize metrics client
+        self.metrics = BreederMetricsClient(
+            breeder_id=self.breeder_id,
+            worker_id=self.worker_id,
+            breeder_type=self.breeder_type
+        )
         
     def _assign_sampler(self) -> str:
         """Assign a sampler type to this worker for algorithm diversity"""
@@ -725,10 +734,18 @@ class BreederWorker:
             rollback_state['consecutive_failures'] = 0  # Reset counter
             self._update_rollback_state(rollback_state)
 
+            # Track successful rollback
+            self.metrics.inc_rollback('success')
+            self.metrics.push()
+
             return True
 
         except Exception as e:
             logger.error(f"Rollback execution failed: {e}", exc_info=True)
+
+            # Track failed rollback
+            self.metrics.inc_rollback('failed')
+            self.metrics.push()
 
             # Handle rollback failure based on on_failure policy
             on_failure = strategy.get('on_failure', 'stop')
@@ -904,6 +921,10 @@ class BreederWorker:
         logger.info(f"Starting BreederWorker: {self.worker_id}")
         logger.info(f"Breeder type: {self.breeder_type}, UUID: {self.breeder_uuid}")
 
+        # Mark worker as running
+        self.metrics.mark_running()
+        self.metrics.push()
+
         trial_count = 0
 
         try:
@@ -939,6 +960,8 @@ class BreederWorker:
                 trial = self.study.ask()
                 logger.info(f"Trial {trial.number} started")
 
+                trial_start_time = time.time()
+
                 try:
                     params = self._suggest_params(trial)
                     metrics = self._execute_trial(params)
@@ -952,14 +975,34 @@ class BreederWorker:
                         self.study.tell(trial, state=TrialState.FAIL)
                         logger.info(f"Trial {trial.number} marked as FAILED (guardrail violation)")
 
+                        # Track guardrail violations
+                        for violation_msg in violations:
+                            guardrail_name = violation_msg.split(':')[0] if ':' in violation_msg else 'unknown'
+                            self.metrics.inc_guardrail_violation(guardrail_name)
+
                         # Track failures for rollback logic
                         self._handle_guardrail_violation(params)
+
+                        # Track failed trial
+                        self.metrics.inc_trial('failed')
+                        self.metrics.inc_effectuation('failure')
                     else:
                         # No guardrail violations - accept trial results
                         values = [metrics.get(obj.get('name')) for obj in self.config.get('objectives', [])]
                         self.study.tell(trial, values)
 
+                        trial_duration = time.time() - trial_start_time
+
                         logger.info(f"Trial {trial.number} completed with values: {values}")
+
+                        # Update metrics
+                        self.metrics.inc_trial('complete', value=values[0] if values else None)
+                        self.metrics.observe_trial_duration(trial_duration)
+                        self.metrics.inc_effectuation('success')
+
+                        # Update best value if this is the new best
+                        if self.study.best_trial and self.study.best_trial.number == trial.number:
+                            self.metrics.set_best_value(values[0] if values else 0)
 
                         # Reset failure counter on successful trial
                         self._handle_successful_trial(params)
@@ -968,14 +1011,25 @@ class BreederWorker:
                             frozen_trial = self.study.trials[-1]
                             self.communication_callback(self.study, frozen_trial)
 
+                            # Track shared trials
+                            coop_config = self.config.get('cooperation', {})
+                            share_strategy = coop_config.get('share_strategy', 'unknown')
+                            self.metrics.inc_trial_shared(share_strategy)
+
                     trial_count += 1
                     if trial_count % 5 == 0:
                         self._update_state()
+                        self.metrics.set_total_trials(len(self.study.trials))
+                        self.metrics.push()  # Push metrics every 5 trials
 
                 except Exception as e:
                     logger.error(f"Trial {trial.number} failed: {e}", exc_info=True)
                     self.study.tell(trial, state=TrialState.FAIL)
                     logger.info(f"Trial {trial.number} marked as FAILED")
+
+                    # Track failed trial
+                    self.metrics.inc_trial('failed')
+                    self.metrics.inc_effectuation('failure')
 
                     # Track failures for rollback logic
                     # (even non-guardrail failures count toward consecutive failures)
@@ -985,6 +1039,10 @@ class BreederWorker:
             logger.error(f"Breeder {self.breeder_id} failed: {e}", exc_info=True)
             self._update_state()
             raise
+        finally:
+            # Always mark worker as stopped
+            self.metrics.mark_stopped()
+            self.metrics.push()
 
         self._update_state()
         logger.info(f"BreederWorker {self.worker_id} completed {len(self.study.trials)} trials")

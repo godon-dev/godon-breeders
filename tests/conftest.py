@@ -33,3 +33,4 @@ from unittest.mock import MagicMock
 sys.modules['wmill'] = MagicMock()
 sys.modules['prometheus_api_client'] = MagicMock()
 sys.modules['prometheus_api_client.exceptions'] = MagicMock()
+sys.modules['prometheus_client'] = MagicMock()
