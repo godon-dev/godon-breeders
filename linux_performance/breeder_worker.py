@@ -30,7 +30,7 @@ from typing import Dict, Any, Optional, List
 from optuna.trial import TrialState
 from optuna.samplers import TPESampler, NSGAIISampler, NSGAIIISampler, RandomSampler, QMCSampler
 from scipy.stats import percentileofscore
-from linux_performance.breeder_metrics_client import BreederMetricsClient
+from f.breeder.linux_performance.breeder_metrics_client import BreederMetricsClient
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
