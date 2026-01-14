@@ -8,7 +8,7 @@ Dependencies:
     pip install prometheus_client
 
 Usage:
-    from linux_performance.breeder_metrics_client import BreederMetricsClient
+    from f.breeder.linux_performance.breeder_metrics_client import BreederMetricsClient
 
     metrics = BreederMetricsClient(breeder_id='abc-123', worker_id='worker_1', breeder_type='linux_performance')
     metrics.mark_running()

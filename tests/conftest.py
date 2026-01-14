@@ -34,3 +34,50 @@ sys.modules['wmill'] = MagicMock()
 sys.modules['prometheus_api_client'] = MagicMock()
 sys.modules['prometheus_api_client.exceptions'] = MagicMock()
 sys.modules['prometheus_client'] = MagicMock()
+
+# Create stub modules for f.breeder.linux_performance to support Windmill imports
+# This allows breeder_worker.py to import from f.breeder.linux_performance.breeder_metrics_client
+class FakeBreederModule:
+    """Stub module for f.breeder.linux_performance hierarchy"""
+    def __init__(self):
+        self.__path__ = []
+        self.__spec__ = None
+        self.__name__ = 'f.breeder.linux_performance'
+
+# Add parent directory to sys.path so we can import linux_performance modules
+import os
+import sys
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, project_root)
+
+# Create fake f module hierarchy
+fake_f = MagicMock()
+fake_breeder = MagicMock()
+fake_linux_performance = FakeBreederModule()
+fake_f.breeder = fake_breeder
+fake_breeder.linux_performance = fake_linux_performance
+sys.modules['f'] = fake_f
+sys.modules['f.breeder'] = fake_breeder
+sys.modules['f.breeder.linux_performance'] = fake_linux_performance
+
+# Pre-populate breeder modules BEFORE any imports
+for module_name in ['breeder_worker', 'breeder_metrics_client', 'preflight']:
+    stub = FakeBreederModule()
+    sys.modules[f'f.breeder.linux_performance.{module_name}'] = stub
+
+# Now import the actual modules and populate the stubs with their contents
+def populate_stub_module(stub_module, source_module):
+    """Copy attributes from source_module to stub_module"""
+    for attr_name in dir(source_module):
+        if not attr_name.startswith('_'):
+            setattr(stub_module, attr_name, getattr(source_module, attr_name))
+
+# Import breeder modules and populate stubs (in dependency order)
+import linux_performance.breeder_metrics_client as breeder_metrics_client
+populate_stub_module(sys.modules['f.breeder.linux_performance.breeder_metrics_client'], breeder_metrics_client)
+
+import linux_performance.preflight as preflight
+populate_stub_module(sys.modules['f.breeder.linux_performance.preflight'], preflight)
+
+import linux_performance.breeder_worker as breeder_worker
+populate_stub_module(sys.modules['f.breeder.linux_performance.breeder_worker'], breeder_worker)
