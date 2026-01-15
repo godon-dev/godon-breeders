@@ -34,6 +34,7 @@ sys.modules['wmill'] = MagicMock()
 sys.modules['prometheus_api_client'] = MagicMock()
 sys.modules['prometheus_api_client.exceptions'] = MagicMock()
 sys.modules['prometheus_client'] = MagicMock()
+sys.modules['psycopg2'] = MagicMock()
 
 # Create stub modules for f.breeder.linux_performance to support Windmill imports
 # This allows breeder_worker.py to import from f.breeder.linux_performance.breeder_metrics_client

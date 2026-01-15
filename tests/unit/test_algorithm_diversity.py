@@ -151,7 +151,7 @@ class TestSamplerCreation:
         worker.sampler_type = 'tpe'
         
         with patch('linux_performance.breeder_worker.random.choice') as mock_random:
-            mock_random.side_effect = [True, False, True, 10]  # multivariate, group, constant_liar, n_startup
+            mock_random.side_effect = [(True, False), True, 10]  # (multivariate, group), constant_liar, n_startup
             
             with patch('linux_performance.breeder_worker.TPESampler') as mock_tpe:
                 worker._create_sampler('tpe')

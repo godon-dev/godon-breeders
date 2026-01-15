@@ -26,6 +26,7 @@ import hashlib
 import datetime
 import dateutil.parser
 import time
+import psycopg2
 from typing import Dict, Any, Optional, List
 from optuna.trial import TrialState
 from optuna.samplers import TPESampler, NSGAIISampler, NSGAIIISampler, RandomSampler, QMCSampler
@@ -215,8 +216,8 @@ class BreederWorker:
         # LOW = Uncertain, needs empirical validation
         sampler_profiles = {
             'tpe': {
-                'multivariate': [True, False],  # HIGH - Well understood parameter
-                'group': [True, False],  # HIGH - Documented behavior
+                # Valid (multivariate, group) combinations - Optuna requires multivariate=True when group=True
+                'multivariate_group': [(True, True), (True, False), (False, False)],  # HIGH
                 'constant_liar': [True, False],  # HIGH - Proven for parallel optimization
                 'n_startup_trials': [5, 10, 20]  # MEDIUM - Educated guess, needs validation
             },
@@ -239,9 +240,11 @@ class BreederWorker:
         
         if sampler_type == 'tpe':
             profile = sampler_profiles['tpe']
+            multivariate, group = random.choice(profile['multivariate_group'])
+
             config = {
-                'multivariate': random.choice(profile['multivariate']),
-                'group': random.choice(profile['group']),
+                'multivariate': multivariate,
+                'group': group,
                 'constant_liar': random.choice(profile['constant_liar']),
                 'n_startup_trials': random.choice(profile['n_startup_trials'])
             }
