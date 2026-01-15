@@ -26,6 +26,7 @@ import hashlib
 import datetime
 import dateutil.parser
 import time
+import psycopg2
 from typing import Dict, Any, Optional, List
 from optuna.trial import TrialState
 from optuna.samplers import TPESampler, NSGAIISampler, NSGAIIISampler, RandomSampler, QMCSampler
