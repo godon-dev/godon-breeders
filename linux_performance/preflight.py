@@ -9,12 +9,17 @@ This script performs semantic validation before workers are launched:
 Called synchronously by controller before starting workers async.
 """
 
-def main(config=None):
+# Import parameter registry from separate file
+from linux_performance.parameter_registry import PARAMETER_REGISTRY, ETHTOOL_PARAMS
+
+def main(config=None, strict_mode=True):
     """
     Validate breeder configuration for linux_performance breeder.
 
     Args:
         config: Breeder configuration dict
+        strict_mode: If True (default), reject unknown parameters.
+                   If False, allow unknown parameters with warnings.
 
     Returns:
         dict with result status and either success or error details
@@ -25,140 +30,14 @@ def main(config=None):
             "error": "Missing config parameter"
         }
 
-    # Parameter registry for linux_performance breeder
-    #
-    # MAKESHIFT IMPLEMENTATION - WILL BE REPLACED WITH AUTO-DISCOVERY
-    #
-    # Current approach: Hardcoded registry of known parameters
-    # Future approach: Auto-discovery script that runs:
-    #   - sysctl -a (to discover all sysctl parameters)
-    #   - scan /sys filesystem (for sysfs parameters)
-    #   - ethtool queries (for network interface parameters)
-    #   - parse kernel docs for metadata
-    # Then export to YAML file that preflight loads.
-    #
-    # Why makeshift:
-    # - Hardcoded list will become incomplete as Linux evolves
-    # - Manual maintenance doesn't scale
-    # - Auto-discovery is the sustainable long-term solution
-    #
-    # For now: This works for v0.3. Add parameters as needed during testing.
-    # Unknown parameters will be logged as warnings (not errors) to allow
-    # experimentation. Registry will grow organically until auto-discovery
-    # is implemented.
-    #
-    # Defines all supported parameters, their types, and metadata
-    PARAMETER_REGISTRY = {
-        # sysctl parameters
-        "net.ipv4.tcp_rmem": {
-            "type": "int",
-            "category": "sysctl",
-            "requires_reboot": False,
-            "description": "TCP read buffer sizes"
-        },
-        "net.ipv4.tcp_wmem": {
-            "type": "int",
-            "category": "sysctl",
-            "requires_reboot": False,
-            "description": "TCP write buffer sizes"
-        },
-        "net.core.netdev_budget": {
-            "type": "int",
-            "category": "sysctl",
-            "requires_reboot": False,
-            "description": "Network device budget"
-        },
-        "net.core.netdev_max_backlog": {
-            "type": "int",
-            "category": "sysctl",
-            "requires_reboot": False,
-            "description": "Maximum backlog queue length"
-        },
-        "net.core.dev_weight": {
-            "type": "int",
-            "category": "sysctl",
-            "requires_reboot": False,
-            "description": "CPU weight for network device processing"
-        },
-        "net.ipv4.tcp_congestion_control": {
-            "type": "categorical",
-            "category": "sysctl",
-            "requires_reboot": False,
-            "description": "TCP congestion control algorithm"
-        },
-
-        # sysfs parameters (aliases for filesystem paths)
-        "cpu_governor": {
-            "type": "categorical",
-            "category": "sysfs",
-            "requires_reboot": False,
-            "path": "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor",
-            "description": "CPU frequency scaling governor"
-        },
-        "transparent_hugepage": {
-            "type": "categorical",
-            "category": "sysfs",
-            "requires_reboot": False,
-            "path": "/sys/kernel/mm/transparent_hugepage/enabled",
-            "description": "Transparent huge pages setting"
-        },
-        "qdisc": {
-            "type": "categorical",
-            "category": "sysfs",
-            "requires_reboot": False,
-            "path": "/sys/class/net/eth0/queue/disc",
-            "description": "Network interface queue discipline"
-        },
-
-        # cpufreq parameters
-        "governor": {
-            "type": "categorical",
-            "category": "cpufreq",
-            "requires_reboot": False,
-            "description": "CPU frequency governor"
-        },
-        "min_freq_ghz": {
-            "type": "float",
-            "category": "cpufreq",
-            "requires_reboot": False,
-            "description": "Minimum CPU frequency in GHz"
-        },
-        "max_freq_ghz": {
-            "type": "float",
-            "category": "cpufreq",
-            "requires_reboot": False,
-            "description": "Maximum CPU frequency in GHz"
-        },
-
-        # ethtool parameters (per-interface)
-        # Note: Interface names (eth0, etc.) are dynamic keys under ethtool category
-    }
-
-    # Supported ethtool parameters (apply to any network interface)
-    ETHTOOL_PARAMS = {
-        "tso": {
-            "type": "categorical",
-            "requires_reboot": False,
-            "description": "TCP Segmentation Offload"
-        },
-        "gro": {
-            "type": "categorical",
-            "requires_reboot": False,
-            "description": "Generic Receive Offload"
-        },
-        "rx_ring": {
-            "type": "int",
-            "requires_reboot": False,
-            "description": "RX ring buffer size"
-        },
-        "tx_ring": {
-            "type": "int",
-            "requires_reboot": False,
-            "description": "TX ring buffer size"
-        },
-    }
-
     errors = []
+    warnings = []
+
+    # Determine strict mode: parameter > meta config > default (true)
+    meta_section = config.get('meta', {})
+    if 'strict_validation' in meta_section:
+        strict_mode = meta_section['strict_validation']
+    # else: use the strict_mode parameter passed in (default: true)
 
     try:
         settings = config.get('settings', {})
@@ -202,8 +81,18 @@ def main(config=None):
                             continue
 
                         constraints = ethtool_config['constraints']
+
+                        # Pragmatic: Accept both dict and list formats
+                        if isinstance(constraints, dict):
+                            if 'values' in constraints:
+                                # Normalize dict to list for categorical
+                                constraints = [constraints]
+                            else:
+                                errors.append(f"settings.ethtool.{param_name}.{ethtool_param}: constraints dict must have 'values' key")
+                                continue
+
                         if not isinstance(constraints, list):
-                            errors.append(f"settings.ethtool.{param_name}.{ethtool_param}: constraints must be a list")
+                            errors.append(f"settings.ethtool.{param_name}.{ethtool_param}: constraints must be a list or dict with 'values'")
                             continue
 
                         # Check type matching
@@ -223,13 +112,24 @@ def main(config=None):
                 # Non-ethtool parameters
                 else:
                     if param_name not in PARAMETER_REGISTRY:
-                        errors.append(
-                            f"settings.{category}.{param_name}: "
-                            f"unsupported parameter. "
-                            f"Supported {category} parameters: "
-                            f"{', '.join([k for k, v in PARAMETER_REGISTRY.items() if v['category'] == category])}"
-                        )
-                        continue
+                        if strict_mode:
+                            # Strict mode: reject unknown parameters
+                            errors.append(
+                                f"settings.{category}.{param_name}: "
+                                f"unsupported parameter. "
+                                f"Supported {category} parameters: "
+                                f"{', '.join([k for k, v in PARAMETER_REGISTRY.items() if v['category'] == category])}"
+                            )
+                            continue
+                        else:
+                            # Permissive mode: warn but allow
+                            warnings.append(
+                                f"settings.{category}.{param_name}: "
+                                f"parameter not in registry. "
+                                f"Metadata unavailable (reboot requirement, description, safety info). "
+                                f"Proceeding with structural validation only."
+                            )
+                            # Continue to structural validation
 
                     # Validate constraint type matching
                     registry_type = PARAMETER_REGISTRY[param_name]['type']
@@ -238,8 +138,18 @@ def main(config=None):
                         continue
 
                     constraints = param_config['constraints']
+
+                    # Pragmatic: Accept both dict and list formats
+                    if isinstance(constraints, dict):
+                        if 'values' in constraints:
+                            # Normalize dict to list for categorical
+                            constraints = [constraints]
+                        else:
+                            errors.append(f"settings.{category}.{param_name}: constraints dict must have 'values' key")
+                            continue
+
                     if not isinstance(constraints, list):
-                        errors.append(f"settings.{category}.{param_name}: constraints must be a list")
+                        errors.append(f"settings.{category}.{param_name}: constraints must be a list or dict with 'values'")
                         continue
 
                     # Check type matching
@@ -263,12 +173,17 @@ def main(config=None):
                 "error": error_msg
             }
 
-        return {
+        result = {
             "result": "SUCCESS",
             "data": {
                 "message": "Preflight validation passed"
             }
         }
+
+        if warnings:
+            result["data"]["warnings"] = warnings
+
+        return result
 
     except Exception as e:
         return {

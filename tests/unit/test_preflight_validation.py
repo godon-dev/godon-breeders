@@ -256,24 +256,42 @@ class TestPreflightValidation:
         assert result['result'] == 'FAILURE'
         assert "missing 'constraints'" in result['error']
 
-    def test_constraints_not_list_fails(self):
-        """Test that non-list constraints fail preflight"""
+    def test_constraints_dict_without_values_fails(self):
+        """Test that dict constraints without 'values' key fail preflight"""
         from linux_performance import preflight
-        
+
         config = {
             'settings': {
                 'sysctl': {
                     'net.ipv4.tcp_rmem': {
-                        'constraints': {'lower': 4096, 'upper': 131072}  # Dict, not list
+                        'constraints': {'lower': 4096, 'upper': 131072}  # Dict without 'values'
                     }
                 }
             }
         }
-        
+
         result = preflight.main(config=config)
-        
+
         assert result['result'] == 'FAILURE'
-        assert 'constraints must be a list' in result['error']
+        assert 'constraints dict must have' in result['error']
+
+    def test_constraints_dict_with_values_succeeds(self):
+        """Test that dict constraints with 'values' key pass for categorical params"""
+        from linux_performance import preflight
+
+        config = {
+            'settings': {
+                'sysctl': {
+                    'net.ipv4.tcp_congestion_control': {
+                        'constraints': {'values': ['cubic', 'bbr']}  # Dict with 'values'
+                    }
+                }
+            }
+        }
+
+        result = preflight.main(config=config)
+
+        assert result['result'] == 'SUCCESS'
 
     def test_multiple_categories_all_valid(self):
         """Test that config with multiple categories all valid passes"""
