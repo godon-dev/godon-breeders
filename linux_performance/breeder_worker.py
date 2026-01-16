@@ -302,7 +302,7 @@ class BreederWorker:
             'password': os.environ.get("GODON_ARCHIVE_DB_PASSWORD", "postgres"),
             'host': os.environ.get("GODON_ARCHIVE_DB_SERVICE_HOST", "localhost"),
             'port': os.environ.get("GODON_ARCHIVE_DB_SERVICE_PORT", "5432"),
-            'database': self.config.get('breeder_database')
+            'database': self.breeder_id  # Each breeder gets its own database
         }
         return f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
     

@@ -52,8 +52,7 @@ class TestSamplerAssignment:
             'run': {
                 'parallel': 1
             },
-            'objectives': [{'name': 'test_obj', 'direction': 'maximize'}],
-            'breeder_database': 'test_db'
+            'objectives': [{'name': 'test_obj', 'direction': 'maximize'}]
         }
         
         mock_study.return_value = MagicMock()
@@ -76,8 +75,7 @@ class TestSamplerAssignment:
             'run': {
                 'parallel': 3
             },
-            'objectives': [{'name': 'test_obj', 'direction': 'maximize'}],
-            'breeder_database': 'test_db'
+            'objectives': [{'name': 'test_obj', 'direction': 'maximize'}]
         }
         
         mock_study.return_value = MagicMock()
@@ -111,8 +109,7 @@ class TestSamplerAssignment:
             'run': {
                 'parallel': 3
             },
-            'objectives': [{'name': 'test_obj', 'direction': 'maximize'}],
-            'breeder_database': 'test_db'
+            'objectives': [{'name': 'test_obj', 'direction': 'maximize'}]
         }
         
         mock_study.return_value = MagicMock()
@@ -140,8 +137,7 @@ class TestSamplerCreation:
             },
             'creation_ts': '2025-01-15T10:30:00Z',
             'run': {'parallel': 2},
-            'objectives': [{'name': 'test_obj', 'direction': 'maximize'}],
-            'breeder_database': 'test_db'
+            'objectives': [{'name': 'test_obj', 'direction': 'maximize'}]
         }
         
         mock_study.return_value = MagicMock()
@@ -171,8 +167,7 @@ class TestSamplerCreation:
             },
             'creation_ts': '2025-01-15T10:30:00Z',
             'run': {'parallel': 2},
-            'objectives': [{'name': 'test_obj', 'direction': 'maximize'}],
-            'breeder_database': 'test_db'
+            'objectives': [{'name': 'test_obj', 'direction': 'maximize'}]
         }
         
         mock_study.return_value = MagicMock()
@@ -206,8 +201,7 @@ class TestStudyNaming:
             },
             'creation_ts': '2025-01-15T10:30:00Z',
             'run': {'parallel': 1},
-            'objectives': [{'name': 'test_obj', 'direction': 'maximize'}],
-            'breeder_database': 'test_db'
+            'objectives': [{'name': 'test_obj', 'direction': 'maximize'}]
         }
         
         mock_storage = MagicMock()
@@ -234,8 +228,7 @@ class TestStudyNaming:
             },
             'creation_ts': '2025-01-15T10:30:00Z',
             'run': {'parallel': 3},
-            'objectives': [{'name': 'test_obj', 'direction': 'maximize'}],
-            'breeder_database': 'test_db'
+            'objectives': [{'name': 'test_obj', 'direction': 'maximize'}]
         }
         
         mock_storage = MagicMock()
@@ -279,8 +272,7 @@ class TestCommunicationCallback:
             'creation_ts': '2025-01-15T10:30:00Z',
             'run': {'parallel': 3},
             'cooperation': {'active': True, 'consolidation': {'probability': 0.8}},
-            'objectives': [{'name': 'test_obj', 'direction': 'maximize'}],
-            'breeder_database': 'test_db'
+            'objectives': [{'name': 'test_obj', 'direction': 'maximize'}]
         }
         
         mock_study.return_value = MagicMock()
