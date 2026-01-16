@@ -297,14 +297,19 @@ class BreederWorker:
             return TPESampler()
     
     def _get_db_url(self) -> str:
+        # Replace dashes with underscores for PostgreSQL database name compatibility
+        db_name = self.breeder_uuid.replace('-', '_')
         db_config = {
             'user': os.environ.get("GODON_ARCHIVE_DB_USER", "postgres"),
             'password': os.environ.get("GODON_ARCHIVE_DB_PASSWORD", "postgres"),
             'host': os.environ.get("GODON_ARCHIVE_DB_SERVICE_HOST", "localhost"),
             'port': os.environ.get("GODON_ARCHIVE_DB_SERVICE_PORT", "5432"),
-            'database': self.breeder_id  # Each breeder gets its own database
+            'database': db_name  # Database named after UUID (schema-based separation)
         }
-        return f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+        # Use currentSchema parameter to set the default schema for Optuna tables
+        # This is the verified solution from Optuna issue #961
+        # See: https://github.com/optuna/optuna/issues/961
+        return f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}?currentSchema=breeder"
     
     def _load_or_create_study(self) -> optuna.Study:
         # Create sampler-specific study name for algorithm diversity
