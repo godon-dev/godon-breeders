@@ -134,7 +134,9 @@ class BreederWorker:
 
         self.breeder_type = breeder_config.get('name', 'unknown_breeder')
         self.breeder_uuid = breeder_config.get('uuid', breeder_config.get('name', 'unknown'))
-        self.breeder_id = self.breeder_uuid  # For database/communication
+        self.breeder_id = self.breeder_uuid  # For metadata/communication
+        # Database name: breeder_ prefix + UUID with underscores (PostgreSQL compatibility)
+        self.breeder_db_name = f"breeder_{self.breeder_uuid.replace('-', '_')}"
         self.worker_id = f"{self.breeder_type}_worker_{self.breeder_uuid}"
 
         # Parse creation timestamp for completion criteria
@@ -302,7 +304,7 @@ class BreederWorker:
             'password': os.environ.get("GODON_ARCHIVE_DB_PASSWORD", "postgres"),
             'host': os.environ.get("GODON_ARCHIVE_DB_SERVICE_HOST", "localhost"),
             'port': os.environ.get("GODON_ARCHIVE_DB_SERVICE_PORT", "5432"),
-            'database': self.breeder_id  # Each breeder gets its own database
+            'database': self.breeder_db_name  # Uses breeder_ prefix + UUID with underscores
         }
         return f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
     
