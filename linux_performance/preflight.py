@@ -10,7 +10,7 @@ Called synchronously by controller before starting workers async.
 """
 
 # Import parameter registry from separate file
-from linux_performance.parameter_registry import PARAMETER_REGISTRY, ETHTOOL_PARAMS
+from f.breeder.linux_performance.parameter_registry import PARAMETER_REGISTRY, ETHTOOL_PARAMS
 
 def main(config=None, strict_mode=True):
     """

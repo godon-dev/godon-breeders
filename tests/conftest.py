@@ -62,7 +62,7 @@ sys.modules['f.breeder'] = fake_breeder
 sys.modules['f.breeder.linux_performance'] = fake_linux_performance
 
 # Pre-populate breeder modules BEFORE any imports
-for module_name in ['breeder_worker', 'breeder_metrics_client', 'preflight']:
+for module_name in ['breeder_worker', 'breeder_metrics_client', 'parameter_registry', 'preflight']:
     stub = FakeBreederModule()
     sys.modules[f'f.breeder.linux_performance.{module_name}'] = stub
 
@@ -76,6 +76,9 @@ def populate_stub_module(stub_module, source_module):
 # Import breeder modules and populate stubs (in dependency order)
 import linux_performance.breeder_metrics_client as breeder_metrics_client
 populate_stub_module(sys.modules['f.breeder.linux_performance.breeder_metrics_client'], breeder_metrics_client)
+
+import linux_performance.parameter_registry as parameter_registry
+populate_stub_module(sys.modules['f.breeder.linux_performance.parameter_registry'], parameter_registry)
 
 import linux_performance.preflight as preflight
 populate_stub_module(sys.modules['f.breeder.linux_performance.preflight'], preflight)
