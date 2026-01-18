@@ -7,7 +7,7 @@ scripts:
     settings:
       summary: "Autonomous Breeder Worker for Linux Performance Optimization"
       description: "Self-driving Optuna optimization agent with ask/tell pattern for system parameter tuning"
-      timeout: 600
+      tag: "breeder"  # Routes to breeder worker group (no timeout for long-running jobs)
 
 flows:
   - pattern: "effectuation_flow.yaml"
