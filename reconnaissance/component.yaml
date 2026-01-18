@@ -8,5 +8,6 @@ scripts:
       summary: "Generic Prometheus Reconnaissance"
       description: "Gather metrics from Prometheus with configurable stabilization delay, multi-sampling with median aggregation, and exponential backoff retry logic for transient failures."
       timeout: 300
+      tag: "breeder"  # Routes to breeder worker group (no timeout for long-running metric gathering with delays)
 
 flows: []
