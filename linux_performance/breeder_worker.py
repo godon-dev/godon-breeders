@@ -30,6 +30,14 @@ import psycopg2
 from typing import Dict, Any, Optional, List
 from optuna.trial import TrialState
 from optuna.samplers import TPESampler, NSGAIISampler, NSGAIIISampler, RandomSampler, QMCSampler
+from optuna.samplers.nsgaii import (
+    UniformCrossover,
+    UNDXCrossover,
+    SPXCrossover,
+    BLXAlphaCrossover,
+    SBXCrossover,
+    VSBXCrossover
+)
 from scipy.stats import percentileofscore
 from f.breeder.linux_performance.breeder_metrics_client import BreederMetricsClient
 
@@ -224,10 +232,10 @@ class BreederWorker:
                 'n_startup_trials': [5, 10, 20]  # MEDIUM - Educated guess, needs validation
             },
             'nsga2': {
-                'population_size': [20, 50, 100],  # HIGH - Default 50, range well-established
+                'population_size': [30, 50, 75, 100, 125, 150],  # Safe min=30, max=150 with 6 diverse steps
                 'mutation_prob': [0.05, 0.1, 0.15],  # LOW - Educated guess from GA literature
                 'crossover_prob': [0.8, 0.9, 0.95],  # MEDIUM - Common GA values, less certain for Optuna
-                'crossover': ['uniform', 'UNDX', 'SPX']  # LOW - UNDX/SPX need validation
+                'crossover': ['uniform', 'UNDX', 'SPX', 'BLXAlpha', 'SBX', 'VSBX']  # All Optuna NSGA-II crossovers
             },
             'nsga3': {
                 'population_size': [50, 100]  # HIGH - Safe variations on default
@@ -256,23 +264,35 @@ class BreederWorker:
         elif sampler_type == 'nsga2':
             profile = sampler_profiles['nsga2']
             population_size = random.choice(profile['population_size'])
-            crossover = random.choice(profile['crossover'])
-            
-            # Skip crossover-specific parameters if not using that crossover
-            crossover_params = {}
-            if crossover == 'uniform':
-                crossover_params['crossover'] = 'uniform'
-            elif crossover in ['UNDX', 'SPX']:
-                crossover_params['crossover'] = crossover
-                crossover_params['population_size'] = max(population_size, 3)  # UNDX/SPX need >=3 parents
-            
+            crossover_name = random.choice(profile['crossover'])
+
+            # Instantiate crossover objects (not strings)
+            # NOTE: UNDX and SPX require population_size >= n_parents (3)
+            if crossover_name == 'uniform':
+                crossover_obj = UniformCrossover()
+            elif crossover_name == 'UNDX':
+                population_size = max(population_size, 3)  # UNDX needs 3+ parents
+                crossover_obj = UNDXCrossover()
+            elif crossover_name == 'SPX':
+                population_size = max(population_size, 3)  # SPX needs 3+ parents
+                crossover_obj = SPXCrossover()
+            elif crossover_name == 'BLXAlpha':
+                crossover_obj = BLXAlphaCrossover()
+            elif crossover_name == 'SBX':
+                crossover_obj = SBXCrossover()
+            elif crossover_name == 'VSBX':
+                crossover_obj = VSBXCrossover()
+            else:
+                logger.warning(f"Unknown crossover '{crossover_name}', falling back to UniformCrossover")
+                crossover_obj = UniformCrossover()
+
             config = {
                 'population_size': population_size,
                 'mutation_prob': random.choice(profile['mutation_prob']),
                 'crossover_prob': random.choice(profile['crossover_prob']),
-                **crossover_params
+                'crossover': crossover_obj
             }
-            logger.info(f"Created NSGAII sampler with config: {config}")
+            logger.info(f"Created NSGAII sampler with crossover={crossover_name}, config: {config}")
             return NSGAIISampler(**config)
         
         elif sampler_type == 'nsga3':
