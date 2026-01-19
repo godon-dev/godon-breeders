@@ -719,8 +719,8 @@ class BreederWorker:
         if target_state == 'previous':
             params_to_restore = rollback_state.get('last_successful_params')
         elif target_state == 'best':
-            # Get best trial from study
-            if self.study.best_trials[0]:
+            # Get first Pareto-optimal trial for deterministic rollback
+            if self.study.best_trials:
                 params_to_restore = self.study.best_trials[0].params
             else:
                 logger.error("Cannot rollback to 'best': no best trial found")
@@ -899,46 +899,53 @@ class BreederWorker:
         return elapsed_seconds >= budget_seconds
     
     def _check_quality_thresholds(self) -> bool:
-        """Check if all objectives have reached their quality thresholds"""
-        if not self.study.best_trials[0]:
+        """Check if ANY Pareto-optimal trial meets all quality thresholds"""
+        if not self.study.best_trials:
             return False
-        
+
         objectives = self.config.get('objectives', [])
         if not objectives:
             return False
-        
+
         # Check if all objectives have quality_threshold defined
         for objective in objectives:
             if 'quality_threshold' not in objective:
                 return False
-        
-        # Check if all thresholds achieved
-        for obj_value, objective in zip(self.study.best_trials[0].values, objectives):
-            threshold = objective.get('quality_threshold')
-            direction = objective.get('direction', 'minimize')
-            
-            if direction == 'minimize':
-                if obj_value > threshold:
-                    return False
-            elif direction == 'maximize':
-                if obj_value < threshold:
-                    return False
-        
-        return True
+
+        # Check if ANY trial in the Pareto front meets ALL thresholds
+        for trial in self.study.best_trials:
+            all_thresholds_met = True
+            for obj_value, objective in zip(trial.values, objectives):
+                threshold = objective.get('quality_threshold')
+                direction = objective.get('direction', 'minimize')
+
+                if direction == 'minimize':
+                    if obj_value > threshold:
+                        all_thresholds_met = False
+                        break
+                elif direction == 'maximize':
+                    if obj_value < threshold:
+                        all_thresholds_met = False
+                        break
+
+            if all_thresholds_met:
+                return True  # At least one trial meets all thresholds
+
+        return False  # No trial meets all thresholds
     
     def _update_state(self):
+        """Update Windmill state with minimal progress tracking
+
+        Note: Full trial data is stored in Optuna DB and exported via Prometheus.
+        Windmill state is kept minimal for basic monitoring.
+        """
         state = {
             'breeder_id': self.breeder_id,
             'total_trials': len(self.study.trials),
             'study_name': self.study.study_name,
             'status': 'running'
         }
-        
-        if self.study.best_trials[0]:
-            state['best_trial_number'] = self.study.best_trials[0].number
-            state['best_params'] = self.study.best_trials[0].params
-            state['best_values'] = self.study.best_trials[0].values
-        
+
         wmill.set_state(state)
         logger.debug(f"Updated Windmill state: {state}")
     
@@ -1072,10 +1079,12 @@ class BreederWorker:
         self._update_state()
         logger.info(f"BreederWorker {self.worker_id} completed {len(self.study.trials)} trials")
 
-        if self.study.best_trials[0]:
-            logger.info(f"Best trial: {self.study.best_trials[0].number}")
-            logger.info(f"Best params: {self.study.best_trials[0].params}")
-            logger.info(f"Best values: {self.study.best_trials[0].values}")
+        if self.study.best_trials:
+            logger.info(f"Found {len(self.study.best_trials)} Pareto-optimal trials")
+            for i, trial in enumerate(self.study.best_trials[:3]):  # Log first 3
+                logger.info(f"  Trial {i+1}: #{trial.number}, values={trial.values}, params={trial.params}")
+            if len(self.study.best_trials) > 3:
+                logger.info(f"  ... and {len(self.study.best_trials) - 3} more")
 
 
 def main(config: Dict[str, Any], breeder_id: str = None, run_id: int = None, target_id: int = None) -> Dict[str, Any]:
@@ -1104,7 +1113,6 @@ def main(config: Dict[str, Any], breeder_id: str = None, run_id: int = None, tar
         'run_id': run_id,
         'target_id': target_id,
         'total_trials': len(worker.study.trials),
-        'best_params': worker.study.best_trials[0].params if worker.study.best_trials else None,
-        'best_values': worker.study.best_trials[0].values if worker.study.best_trials else None,
+        'pareto_optimal_trials': len(worker.study.best_trials),
         'status': 'completed'
     }
