@@ -720,8 +720,8 @@ class BreederWorker:
             params_to_restore = rollback_state.get('last_successful_params')
         elif target_state == 'best':
             # Get best trial from study
-            if self.study.best_trial:
-                params_to_restore = self.study.best_trial.params
+            if self.study.best_trials[0]:
+                params_to_restore = self.study.best_trials[0].params
             else:
                 logger.error("Cannot rollback to 'best': no best trial found")
                 return False
@@ -900,7 +900,7 @@ class BreederWorker:
     
     def _check_quality_thresholds(self) -> bool:
         """Check if all objectives have reached their quality thresholds"""
-        if not self.study.best_trial:
+        if not self.study.best_trials[0]:
             return False
         
         objectives = self.config.get('objectives', [])
@@ -913,7 +913,7 @@ class BreederWorker:
                 return False
         
         # Check if all thresholds achieved
-        for obj_value, objective in zip(self.study.best_trial.values, objectives):
+        for obj_value, objective in zip(self.study.best_trials[0].values, objectives):
             threshold = objective.get('quality_threshold')
             direction = objective.get('direction', 'minimize')
             
@@ -934,10 +934,10 @@ class BreederWorker:
             'status': 'running'
         }
         
-        if self.study.best_trial:
-            state['best_trial_number'] = self.study.best_trial.number
-            state['best_params'] = self.study.best_trial.params
-            state['best_values'] = self.study.best_trial.values
+        if self.study.best_trials[0]:
+            state['best_trial_number'] = self.study.best_trials[0].number
+            state['best_params'] = self.study.best_trials[0].params
+            state['best_values'] = self.study.best_trials[0].values
         
         wmill.set_state(state)
         logger.debug(f"Updated Windmill state: {state}")
@@ -1026,7 +1026,7 @@ class BreederWorker:
                         self.metrics.inc_effectuation('success')
 
                         # Update best value if this is the new best
-                        if self.study.best_trial and self.study.best_trial.number == trial.number:
+                        if self.study.best_trials[0] and self.study.best_trials[0].number == trial.number:
                             self.metrics.set_best_value(values[0] if values else 0)
 
                         # Reset failure counter on successful trial
@@ -1072,10 +1072,10 @@ class BreederWorker:
         self._update_state()
         logger.info(f"BreederWorker {self.worker_id} completed {len(self.study.trials)} trials")
 
-        if self.study.best_trial:
-            logger.info(f"Best trial: {self.study.best_trial.number}")
-            logger.info(f"Best params: {self.study.best_trial.params}")
-            logger.info(f"Best values: {self.study.best_trial.values}")
+        if self.study.best_trials[0]:
+            logger.info(f"Best trial: {self.study.best_trials[0].number}")
+            logger.info(f"Best params: {self.study.best_trials[0].params}")
+            logger.info(f"Best values: {self.study.best_trials[0].values}")
 
 
 def main(config: Dict[str, Any], breeder_id: str = None, run_id: int = None, target_id: int = None) -> Dict[str, Any]:
@@ -1104,7 +1104,7 @@ def main(config: Dict[str, Any], breeder_id: str = None, run_id: int = None, tar
         'run_id': run_id,
         'target_id': target_id,
         'total_trials': len(worker.study.trials),
-        'best_params': worker.study.best_trial.params if worker.study.best_trial else None,
-        'best_values': worker.study.best_trial.values if worker.study.best_trial else None,
+        'best_params': worker.study.best_trials[0].params if worker.study.best_trials else None,
+        'best_values': worker.study.best_trials[0].values if worker.study.best_trials else None,
         'status': 'completed'
     }
