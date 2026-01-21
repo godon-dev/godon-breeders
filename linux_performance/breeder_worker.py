@@ -982,7 +982,6 @@ class BreederWorker:
                     if after_action == 'pause':
                         pause_duration = after_policy.get('duration', 300)
                         logger.info(f"Pausing for {pause_duration} seconds after rollback")
-                        import time
                         time.sleep(pause_duration)
                     elif after_action == 'stop':
                         logger.info("Rollback completed with after.action=stop, halting optimization")
