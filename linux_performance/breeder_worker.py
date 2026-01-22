@@ -843,31 +843,65 @@ class BreederWorker:
     
     def _should_continue(self) -> bool:
         completion_criteria = self.config.get('run', {}).get('completion_criteria', {})
-        
+
         min_iterations = completion_criteria.get('iterations', {}).get('min', 10)
         max_iterations = completion_criteria.get('iterations', {}).get('max', 1000)
-        
+
         n_trials = len(self.study.trials)
-        
+
         if n_trials < min_iterations:
             logger.debug(f"Continuing: {n_trials} < {min_iterations} min iterations")
             return True
         if n_trials >= max_iterations:
             logger.info(f"Stopping: {n_trials} >= {max_iterations} max iterations")
             return False
-        
+
         # Check time budget
         if self._check_time_budget(completion_criteria):
             logger.info("Stopping: Time budget exceeded")
             return False
-        
+
         # Check quality thresholds
         if completion_criteria.get('quality_achieved', False):
             if self._check_quality_thresholds():
                 logger.info("Stopping: All quality thresholds achieved")
                 return False
-            
+
+        # Check shutdown flag from controller
+        if self._check_shutdown_requested():
+            logger.info("Stopping: Shutdown requested by controller")
+            return False
+
         return True
+
+    def _check_shutdown_requested(self) -> bool:
+        """Check if graceful shutdown has been requested by controller
+
+        Queries the breeder_state table in the archive database to see if
+        shutdown_requested flag is set. This allows graceful worker shutdown.
+
+        Returns:
+            True if shutdown requested, False otherwise
+        """
+        try:
+            # Query the breeder_state table in the archive DB
+            query = "SELECT shutdown_requested FROM breeder_state LIMIT 1;"
+            result = self.study.storage._engine.execute(query)
+
+            if result and result.rowcount > 0:
+                row = result.fetchone()
+                shutdown_requested = row[0] if row else False
+                if shutdown_requested:
+                    logger.info(f"Shutdown flag is set for breeder {self.breeder_uuid}")
+                    return True
+
+            return False
+
+        except Exception as e:
+            # Table might not exist in older breeders, or other DB error
+            # Log warning but don't crash the worker
+            logger.warning(f"Failed to check shutdown flag: {e}")
+            return False
     
     def _check_time_budget(self, completion_criteria: dict) -> bool:
         """Check if time budget has been exceeded"""
