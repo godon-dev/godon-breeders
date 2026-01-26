@@ -1027,6 +1027,8 @@ class BreederWorker:
 
                 trial_start_time = time.time()
 
+                params = None  # Initialize to avoid UnboundLocalError in except block
+
                 try:
                     params = self._suggest_params(trial)
                     metrics = self._execute_trial(params)
