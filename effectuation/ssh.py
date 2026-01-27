@@ -65,8 +65,9 @@ def main(targets: List[Dict[str, Any]], playbook_path: str, playbook_vars: Dict[
                 'ssh_key_variable': ssh_key_path
             }
             
-            # Execute Ansible playbook via Windmill
-            result = wmill.run_flow(playbook_path, target_vars)
+            # Execute Ansible playbook via Windmill (playbooks are scripts, not flows)
+            # Unpack dict as keyword arguments to match script's parameter names
+            result = wmill.run_script_by_path(playbook_path, **target_vars)
             
             if result.get('success'):
                 all_results.append({
