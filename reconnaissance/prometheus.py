@@ -18,6 +18,7 @@
 #
 
 from prometheus_api_client import PrometheusConnect
+from prometheus_api_client.exceptions import PrometheusApiClientException
 import urllib3
 import logging
 import wmill
@@ -25,7 +26,6 @@ import time
 import statistics
 from typing import Dict, Any, List, Optional
 from requests.exceptions import ConnectionError, Timeout
-from prometheus_api_client.exceptions import PrometheusError
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +96,7 @@ def prometheus_query_with_retry(prom_conn, query: str, max_retries: int = 3, ini
             result = prom_conn.custom_query(query)
             return result
             
-        except (ConnectionError, Timeout, PrometheusError) as e:
+        except (ConnectionError, Timeout, PrometheusApiClientException) as e:
             last_exception = e
             if attempt < max_retries - 1:
                 delay = initial_delay * (2 ** attempt)
