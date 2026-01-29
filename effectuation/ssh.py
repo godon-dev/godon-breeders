@@ -68,7 +68,8 @@ def main(targets: List[Dict[str, Any]], playbook_path: str, playbook_vars: Dict[
             }
 
             # Execute Ansible playbook via Windmill (playbooks are scripts, not flows)
-            result = wmill.run_script_by_path(playbook_path, **target_vars)
+            # Pass arguments via args parameter, not as kwargs
+            result = wmill.run_script_by_path(playbook_path, args=target_vars)
             
             if result.get('success'):
                 all_results.append({
