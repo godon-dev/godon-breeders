@@ -9,6 +9,12 @@ scripts:
       description: "Self-driving Optuna optimization agent with ask/tell pattern for system parameter tuning"
       tag: "breeder"  # Routes to breeder worker group (no timeout for long-running jobs)
 
+  - pattern: "effectuate_settings.yml"
+    settings:
+      summary: "Linux Performance Parameters Effectuation Playbook"
+      description: "Ansible playbook for applying sysctl, sysfs, cpufreq, and ethtool parameters via SSH"
+      tag: "breeder"  # Routes to breeder worker group
+
 flows:
   - pattern: "effectuation_flow.yaml"
     settings:
