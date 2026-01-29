@@ -134,15 +134,7 @@ def main(config: Dict[str, Any], targets: List[Dict[str, Any]]) -> Dict[str, Any
     global_recon_config = config.get('reconnaissance', {})
     global_prometheus_config = global_recon_config.get('prometheus', {})
     prometheus_url = global_prometheus_config.get('url', 'http://localhost:9090')
-
-    logger.info(f"Connecting to Prometheus: {prometheus_url}")
-
-    # Create Prometheus connection
-    prom_conn = PrometheusConnect(
-        url=prometheus_url,
-        retry=urllib3.util.retry.Retry(total=3, raise_on_status=True, backoff_factor=0.5),
-        disable_ssl=True
-    )
+    logger.info(f"Default Prometheus URL: {prometheus_url}")
 
     metric_data = {}
 
@@ -152,7 +144,20 @@ def main(config: Dict[str, Any], targets: List[Dict[str, Any]]) -> Dict[str, Any
         logger.info(f"Gathering objective metric: {objective_name}")
 
         recon_config = objective.get('reconnaissance', {})
-        value = _gather_single_metric(prom_conn, objective_name, recon_config)
+
+        # Get prometheus URL: per-objective override or global default
+        objective_prometheus_url = recon_config.get('url', prometheus_url)
+        if recon_config.get('url'):
+            logger.info(f"Using per-objective Prometheus URL: {objective_prometheus_url}")
+
+        # Create Prometheus connection for this objective
+        objective_prom_conn = PrometheusConnect(
+            url=objective_prometheus_url,
+            retry=urllib3.util.retry.Retry(total=3, raise_on_status=True, backoff_factor=0.5),
+            disable_ssl=True
+        )
+
+        value = _gather_single_metric(objective_prom_conn, objective_name, recon_config)
         metric_data[objective_name] = value
 
     # v0.3: Collect metrics for guardrails (safety limits)
@@ -161,7 +166,20 @@ def main(config: Dict[str, Any], targets: List[Dict[str, Any]]) -> Dict[str, Any
         logger.info(f"Gathering guardrail metric: {guardrail_name}")
 
         recon_config = guardrail.get('reconnaissance', {})
-        value = _gather_single_metric(prom_conn, guardrail_name, recon_config)
+
+        # Get prometheus URL: per-guardrail override or global default
+        guardrail_prometheus_url = recon_config.get('url', prometheus_url)
+        if recon_config.get('url'):
+            logger.info(f"Using per-guardrail Prometheus URL: {guardrail_prometheus_url}")
+
+        # Create Prometheus connection for this guardrail
+        guardrail_prom_conn = PrometheusConnect(
+            url=guardrail_prometheus_url,
+            retry=urllib3.util.retry.Retry(total=3, raise_on_status=True, backoff_factor=0.5),
+            disable_ssl=True
+        )
+
+        value = _gather_single_metric(guardrail_prom_conn, guardrail_name, recon_config)
         metric_data[guardrail_name] = value
 
     logger.info(f"Reconnaissance completed with {len(metric_data)} metrics")
