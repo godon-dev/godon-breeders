@@ -58,15 +58,16 @@ def main(targets: List[Dict[str, Any]], playbook_path: str, playbook_vars: Dict[
         
         try:
             # Build variables for this target
+            # Note: playbook_vars contains all configuration parameters (e.g., qdisc, cpu_governor)
+            # The Ansible playbook expects them wrapped in a 'params' dict, not as separate kwargs
             target_vars = {
-                **playbook_vars,
                 'target_hostname': address,
                 'username': username,
-                'ssh_key_variable': ssh_key_path
+                'ssh_key_variable': ssh_key_path,
+                'params': playbook_vars  # Wrap configuration parameters in 'params' dict
             }
-            
+
             # Execute Ansible playbook via Windmill (playbooks are scripts, not flows)
-            # Unpack dict as keyword arguments to match script's parameter names
             result = wmill.run_script_by_path(playbook_path, **target_vars)
             
             if result.get('success'):

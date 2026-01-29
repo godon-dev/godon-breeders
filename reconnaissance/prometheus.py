@@ -129,8 +129,12 @@ def main(config: Dict[str, Any], targets: List[Dict[str, Any]]) -> Dict[str, Any
     """
     logger.info("Starting network reconnaissance via Prometheus")
 
-    # Get Prometheus URL from Windmill resources
-    prometheus_url = wmill.get_resource('u/user/prometheus')
+    # Get Prometheus URL from config (global default or per-objective override)
+    # Priority: 1) per-objective/guardrail config, 2) global reconnaissance config, 3) default
+    global_recon_config = config.get('reconnaissance', {})
+    global_prometheus_config = global_recon_config.get('prometheus', {})
+    prometheus_url = global_prometheus_config.get('url', 'http://localhost:9090')
+
     logger.info(f"Connecting to Prometheus: {prometheus_url}")
 
     # Create Prometheus connection
