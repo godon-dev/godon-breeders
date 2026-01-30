@@ -2,15 +2,6 @@
 # Comprehensive parameter effectuation playbook
 # Handles sysctl, sysfs, cpufreq, and ethtool parameters
 # Categorizes raw params dict using Jinja2 logic
-inventory:
-  all_children:
-    targets:
-      hosts:
-        "{{ target_hostname }}":
-          ansible_host: "{{ target_hostname }}"
-          ansible_user: "{{ username }}"
-          ansible_ssh_private_key_file: ./ssh_key
-          ansible_ssh_common_args: '-o StrictHostKeyChecking=new'
 
 files:
   - variable: "{{ ssh_key_variable }}"
@@ -94,7 +85,12 @@ dependencies:
 
 ---
 - name: Apply Linux performance parameters
-  hosts: targets
+  hosts: "{{ target_hostname }}"
+  vars:
+    ansible_host: "{{ target_hostname }}"
+    ansible_user: "{{ username }}"
+    ansible_ssh_private_key_file: ./ssh_key
+    ansible_ssh_common_args: '-o StrictHostKeyChecking=new'
   become: yes
   tasks:
     - name: Apply sysctl parameters
@@ -148,17 +144,16 @@ dependencies:
 
     - name: Gather all applied parameters
       set_fact:
-        all_applied: []
         all_applied: >
-          {{ all_applied +
-             (sysctl_result.results | selectattr('changed', 'equalto', true) | map(attribute='item') | list | map('regex_replace', '^(.*)$', 'sysctl.\\1') | list) if sysctl_params | length > 0 else [] +
-             (sysfs_params.keys() | list if sysfs_params | length > 0 else [] | map('regex_replace', '^(.*)$', 'sysfs.\\1') | list) +
-             (cpufreq_params.keys() | list if cpufreq_params | length > 0 else [] | map('regex_replace', '^(.*)$', 'cpufreq.\\1') | list) +
-             (ethtool_params.keys() | list if ethtool_params | length > 0 else [] | map('regex_replace', '^(.*)$', 'ethtool.\\1') | list)
+          {{
+            (sysctl_result.results | selectattr('changed', 'equalto', true) | map(attribute='item') | list | map('regex_replace', '^(.*)$', 'sysctl.\\1') | list) if sysctl_params | length > 0 else [] +
+            (sysfs_params.keys() | list if sysfs_params | length > 0 else [] | map('regex_replace', '^(.*)$', 'sysfs.\\1') | list) +
+            (cpufreq_params.keys() | list if cpufreq_params | length > 0 else [] | map('regex_replace', '^(.*)$', 'cpufreq.\\1') | list) +
+            (ethtool_params.keys() | list if ethtool_params | length > 0 else [] | map('regex_replace', '^(.*)$', 'ethtool.\\1') | list)
           }}
 
     - name: Return success result
       delegate_to: localhost
       copy:
-        content: "{{ { 'success': true, 'hostname': target_hostname, 'applied_count': all_applied | length, 'applied_params': all_applied } | to_json }}"
+        content: '{{ { "success": true, "hostname": target_hostname, "applied_count": all_applied | length, "applied_params": all_applied } | to_json }}'
         dest: result.json
