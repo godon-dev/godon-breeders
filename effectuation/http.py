@@ -1,4 +1,6 @@
 #
+# DRAFT - Not yet integrated with any breeder, no examples available
+#
 # Copyright (c) 2019 Matthias Tafelmeier.
 #
 # This file is part of godon
@@ -84,7 +86,7 @@ def main(
                     key_name = auth_creds.get('header_name', 'X-API-Key')
                     headers[key_name] = auth_creds.get('api_key', '')
 
-            full_url = f"{base_url.rstrip('/')}{endpoint_config.get('path', '')}"
+            full_url = f"{base_url.rstrip('/')}{endpoint_config.get('path', '')}" if base_url else endpoint_config.get('path', '')
             method = endpoint_config.get('method', 'POST').upper()
             timeout = endpoint_config.get('timeout_seconds', 30)
 
