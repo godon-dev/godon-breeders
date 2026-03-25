@@ -20,14 +20,15 @@
 from prometheus_api_client import PrometheusConnect
 from prometheus_api_client.exceptions import PrometheusApiClientException
 import urllib3
-import logging
 import wmill
 import time
 import statistics
 from typing import Dict, Any, List, Optional
 from requests.exceptions import ConnectionError, Timeout
 
-logger = logging.getLogger(__name__)
+from f.shared.otel_logging import get_logger
+
+logger = get_logger(__name__)
 
 
 def extract_scalar_value(query_result: Dict[str, Any]) -> Optional[float]:
