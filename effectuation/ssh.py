@@ -17,12 +17,13 @@
 # along with this godon. If not, see <http://www.gnu.org/licenses/>.
 #
 
-import logging
 import time
 from typing import Dict, Any, List
 import wmill
 
-logger = logging.getLogger(__name__)
+from f.shared.otel_logging import get_logger
+
+logger = get_logger(__name__)
 
 
 def main(targets: List[Dict[str, Any]], playbook_path: str, playbook_vars: Dict[str, Any], stabilization_seconds: int = 0) -> Dict[str, Any]:

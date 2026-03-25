@@ -17,11 +17,12 @@ Usage:
 """
 
 import os
-import logging
 from typing import Optional
 from prometheus_client import CollectorRegistry, Gauge, Counter, Histogram, push_to_gateway
 
-logger = logging.getLogger(__name__)
+from f.shared.otel_logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class BreederMetricsClient:

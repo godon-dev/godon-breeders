@@ -19,7 +19,6 @@
 
 import os
 import optuna
-import logging
 import wmill
 import random
 import hashlib
@@ -40,9 +39,9 @@ from optuna.samplers.nsgaii import (
 )
 from scipy.stats import percentileofscore
 from f.breeder.linux_performance.breeder_metrics_client import BreederMetricsClient
+from f.shared.otel_logging import get_logger
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+logger = get_logger(__name__)
 
 
 class CommunicationCallback:
@@ -66,8 +65,7 @@ class CommunicationCallback:
         self.bottom_percentile = bottom_percentile
         self.min_trials_for_filtering = min_trials_for_filtering
         self.share_within_breeder = share_within_breeder
-        self.logger = logging.getLogger('communication-callback')
-        self.logger.setLevel(logging.DEBUG)
+        self.logger = get_logger('communication-callback')
     
     def _share_trial(self, study: optuna.study.Study, trial: optuna.trial.FrozenTrial) -> None:
         """Share completed trial with all cooperating studies in database"""

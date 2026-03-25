@@ -19,13 +19,14 @@
 # along with this godon. If not, see <http://www.gnu.org/licenses/>.
 #
 
-import logging
 import time
 import requests
 from typing import Dict, Any, List
 import wmill
 
-logger = logging.getLogger(__name__)
+from f.shared.otel_logging import get_logger
+
+logger = get_logger(__name__)
 
 
 def main(
