@@ -39,18 +39,18 @@ class FakeBreederModule:
 fake_f = MagicMock()
 fake_breeder = MagicMock()
 fake_linux_performance = FakeBreederModule()
-fake_shared = MagicMock()
+fake_breeder_shared = MagicMock()
 fake_f.breeder = fake_breeder
 fake_breeder.linux_performance = fake_linux_performance
-fake_f.shared = fake_shared
+fake_breeder.shared = fake_breeder_shared
 sys.modules['f'] = fake_f
 sys.modules['f.breeder'] = fake_breeder
 sys.modules['f.breeder.linux_performance'] = fake_linux_performance
-sys.modules['f.shared'] = fake_shared
+sys.modules['f.breeder.shared'] = fake_breeder_shared
 
 fake_otel = MagicMock()
 fake_otel.get_logger = lambda name: MagicMock()
-sys.modules['f.shared.otel_logging'] = fake_otel
+sys.modules['f.breeder.shared.otel_logging'] = fake_otel
 
 # Pre-populate breeder modules BEFORE any imports
 for module_name in ['breeder_worker', 'breeder_metrics_client', 'parameter_registry', 'preflight']:
