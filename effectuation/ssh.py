@@ -1,4 +1,4 @@
-#requirements:
+#extra_requirements:
 #opentelemetry-api
 #opentelemetry-sdk
 #opentelemetry-exporter-otlp
