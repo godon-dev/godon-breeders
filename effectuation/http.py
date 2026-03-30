@@ -1,3 +1,8 @@
+#requirements:
+#opentelemetry-api
+#opentelemetry-sdk
+#opentelemetry-exporter-otlp
+
 #
 # DRAFT - Not yet integrated with any breeder, no examples available
 #
