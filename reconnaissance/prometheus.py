@@ -1,3 +1,8 @@
+#requirements:
+#opentelemetry-api
+#opentelemetry-sdk
+#opentelemetry-exporter-otlp
+
 #
 # Copyright (c) 2019 Matthias Tafelmeier.
 #
