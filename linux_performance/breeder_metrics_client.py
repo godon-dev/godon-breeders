@@ -20,7 +20,7 @@ import os
 from typing import Optional
 from prometheus_client import CollectorRegistry, Gauge, Counter, Histogram, push_to_gateway
 
-from f.shared.otel_logging import get_logger
+from f.breeder.shared.otel_logging import get_logger
 
 logger = get_logger(__name__)
 

@@ -39,7 +39,7 @@ from optuna.samplers.nsgaii import (
 )
 from scipy.stats import percentileofscore
 from f.breeder.linux_performance.breeder_metrics_client import BreederMetricsClient
-from f.shared.otel_logging import get_logger
+from f.breeder.shared.otel_logging import get_logger
 
 logger = get_logger(__name__)
 
