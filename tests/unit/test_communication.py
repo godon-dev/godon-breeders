@@ -6,7 +6,9 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
 from engine.communication import CommunicationCallback
+import engine.communication as _comm_mod
 
+_REAL_TRIAL_STATE = _comm_mod.TrialState
 
 class TestProbabilisticStrategy:
     def test_shares_when_random_below_probability(self):
@@ -32,12 +34,11 @@ class TestProbabilisticStrategy:
 
 class TestBestStrategy:
     def _setup_study_with_trials(self, trial_values):
-        from optuna.trial import TrialState
         study = MagicMock()
         completed_trials = []
         for i, val in enumerate(trial_values):
             t = MagicMock()
-            t.state = TrialState.COMPLETE
+            t.state = _REAL_TRIAL_STATE.COMPLETE
             t.values = [val]
             completed_trials.append(t)
         study.trials = completed_trials
@@ -93,12 +94,11 @@ class TestWorstStrategy:
             bottom_percentile=0.2,
             min_trials_for_filtering=5,
         )
-        from optuna.trial import TrialState
         study = MagicMock()
         mock_trials = []
         for _ in range(10):
             t = MagicMock()
-            t.state = TrialState.COMPLETE
+            t.state = _REAL_TRIAL_STATE.COMPLETE
             t.values = [1.0]
             mock_trials.append(t)
         study.trials = mock_trials
@@ -115,12 +115,11 @@ class TestWorstStrategy:
             bottom_percentile=0.2,
             min_trials_for_filtering=5,
         )
-        from optuna.trial import TrialState
         study = MagicMock()
         mock_trials = []
         for _ in range(10):
             t = MagicMock()
-            t.state = TrialState.COMPLETE
+            t.state = _REAL_TRIAL_STATE.COMPLETE
             t.values = [1.0]
             mock_trials.append(t)
         study.trials = mock_trials
@@ -140,12 +139,11 @@ class TestExtremesStrategy:
             bottom_percentile=0.2,
             min_trials_for_filtering=5,
         )
-        from optuna.trial import TrialState
         study = MagicMock()
         mock_trials = []
         for _ in range(10):
             t = MagicMock()
-            t.state = TrialState.COMPLETE
+            t.state = _REAL_TRIAL_STATE.COMPLETE
             t.values = [1.0]
             mock_trials.append(t)
         study.trials = mock_trials
@@ -163,12 +161,11 @@ class TestExtremesStrategy:
             bottom_percentile=0.2,
             min_trials_for_filtering=5,
         )
-        from optuna.trial import TrialState
         study = MagicMock()
         mock_trials = []
         for _ in range(10):
             t = MagicMock()
-            t.state = TrialState.COMPLETE
+            t.state = _REAL_TRIAL_STATE.COMPLETE
             t.values = [1.0]
             mock_trials.append(t)
         study.trials = mock_trials
@@ -186,12 +183,11 @@ class TestExtremesStrategy:
             bottom_percentile=0.2,
             min_trials_for_filtering=5,
         )
-        from optuna.trial import TrialState
         study = MagicMock()
         mock_trials = []
         for _ in range(10):
             t = MagicMock()
-            t.state = TrialState.COMPLETE
+            t.state = _REAL_TRIAL_STATE.COMPLETE
             t.values = [1.0]
             mock_trials.append(t)
         study.trials = mock_trials
@@ -205,12 +201,11 @@ class TestExtremesStrategy:
 class TestUnknownStrategy:
     def test_unknown_strategy_defaults_to_share(self):
         cb = CommunicationCallback(storage="sqlite:///test.db", share_strategy="unknown")
-        from optuna.trial import TrialState
         study = MagicMock()
         mock_trials = []
         for _ in range(10):
             t = MagicMock()
-            t.state = TrialState.COMPLETE
+            t.state = _REAL_TRIAL_STATE.COMPLETE
             t.values = [1.0]
             mock_trials.append(t)
         study.trials = mock_trials

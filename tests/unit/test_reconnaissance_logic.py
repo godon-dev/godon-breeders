@@ -345,6 +345,8 @@ class TestGatherSingleMetric:
 
 
 class TestPrometheusQueryWithRetry:
+    _MockPromExc = type('PrometheusApiClientException', (Exception,), {})
+
     def test_succeeds_on_first_attempt(self):
         from reconnaissance.prometheus import prometheus_query_with_retry
         from unittest.mock import MagicMock
@@ -355,7 +357,7 @@ class TestPrometheusQueryWithRetry:
         prom_conn.custom_query.return_value = expected
 
         with patch('reconnaissance.prometheus.time'), \
-             patch.object(prom_module, 'PrometheusApiClientException', Exception):
+             patch.object(prom_module, 'PrometheusApiClientException', self._MockPromExc):
             result = prometheus_query_with_retry(prom_conn, 'up')
 
         assert result == expected
@@ -373,7 +375,7 @@ class TestPrometheusQueryWithRetry:
         ]
 
         with patch('reconnaissance.prometheus.time'), \
-             patch.object(prom_module, 'PrometheusApiClientException', Exception):
+             patch.object(prom_module, 'PrometheusApiClientException', self._MockPromExc):
             result = prometheus_query_with_retry(prom_conn, 'up', max_retries=3, initial_delay=1)
 
         assert result['result'][1] == '42.0'
@@ -392,7 +394,7 @@ class TestPrometheusQueryWithRetry:
         ]
 
         with patch('reconnaissance.prometheus.time'), \
-             patch.object(prom_module, 'PrometheusApiClientException', Exception):
+             patch.object(prom_module, 'PrometheusApiClientException', self._MockPromExc):
             result = prometheus_query_with_retry(prom_conn, 'up', max_retries=3, initial_delay=1)
 
         assert prom_conn.custom_query.call_count == 3
@@ -406,7 +408,7 @@ class TestPrometheusQueryWithRetry:
         prom_conn.custom_query.side_effect = ConnectionError("refused")
 
         with patch('reconnaissance.prometheus.time'), \
-             patch.object(prom_module, 'PrometheusApiClientException', Exception), \
+             patch.object(prom_module, 'PrometheusApiClientException', self._MockPromExc), \
              pytest.raises(Exception, match="failed after 2 retries"):
             prometheus_query_with_retry(prom_conn, 'up', max_retries=2, initial_delay=1)
 
@@ -417,7 +419,7 @@ class TestPrometheusQueryWithRetry:
         prom_conn = MagicMock()
         prom_conn.custom_query.side_effect = RuntimeError("unexpected")
 
-        with patch.object(prom_module, 'PrometheusApiClientException', Exception), \
+        with patch.object(prom_module, 'PrometheusApiClientException', self._MockPromExc), \
              pytest.raises(RuntimeError, match="unexpected"):
             prometheus_query_with_retry(prom_conn, 'up', max_retries=3)
 
@@ -434,7 +436,7 @@ class TestPrometheusQueryWithRetry:
         ]
 
         with patch('reconnaissance.prometheus.time') as mock_time, \
-             patch.object(prom_module, 'PrometheusApiClientException', Exception):
+             patch.object(prom_module, 'PrometheusApiClientException', self._MockPromExc):
             prometheus_query_with_retry(prom_conn, 'up', max_retries=3, initial_delay=5)
             sleep_calls = [c[0][0] for c in mock_time.sleep.call_args_list]
             assert sleep_calls == [5, 10]

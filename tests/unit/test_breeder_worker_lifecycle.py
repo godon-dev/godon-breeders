@@ -59,6 +59,9 @@ def _create_worker(**config_overrides):
 
 
 class TestExecuteTrial:
+    def setup_method(self):
+        sys.modules['wmill'].reset_mock()
+
     def test_success_returns_metrics(self):
         worker = _create_worker()
         settings = {'vm.swappiness': 10}
