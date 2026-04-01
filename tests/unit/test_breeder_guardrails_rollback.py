@@ -283,7 +283,9 @@ class TestRollbackStateManagement:
 
 class TestExecuteRollback:
     def setup_method(self):
-        sys.modules['wmill'].reset_mock()
+        mock_wmill = sys.modules['wmill']
+        mock_wmill.reset_mock()
+        mock_wmill.run_script_by_path.side_effect = None
 
     def _create_worker_for_rollback(self, target_state='previous', on_failure='stop',
                                     last_successful_params=None, best_trials=None):
