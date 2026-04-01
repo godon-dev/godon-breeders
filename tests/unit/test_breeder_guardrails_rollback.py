@@ -245,12 +245,12 @@ class TestRollbackStateManagement:
         worker._init_rollback_state()
 
         state = worker._get_rollback_state()
-        state['consecutive_failures'] = 1
+        state['consecutive_failures'] = 2
         worker._update_rollback_state(state)
 
         worker._handle_guardrail_violation({'param': 'value'})
         state = worker._get_rollback_state()
-        assert state['consecutive_failures'] == 2
+        assert state['consecutive_failures'] == 3
         assert state['state'] == 'needs_rollback'
 
     def test_handle_guardrail_violation_noop_when_disabled(self):
@@ -335,10 +335,10 @@ class TestExecuteRollback:
         worker = self._create_worker_for_rollback(
             last_successful_params={'net.core.somaxconn': 4096}
         )
-        with patch('engine.breeder_worker.wmill') as mock_wmill:
-            mock_wmill.run_script_by_path.return_value = {'status': 'completed'}
-            result = worker._execute_rollback()
-            assert result is True
+        mock_wmill = sys.modules['wmill']
+        mock_wmill.run_script_by_path.return_value = {'status': 'completed'}
+        result = worker._execute_rollback()
+        assert result is True
 
         state = worker._get_rollback_state()
         assert state['state'] == 'completed'
@@ -350,10 +350,10 @@ class TestExecuteRollback:
         worker = self._create_worker_for_rollback(
             target_state='best', best_trials=[best_trial]
         )
-        with patch('engine.breeder_worker.wmill') as mock_wmill:
-            mock_wmill.run_script_by_path.return_value = {'status': 'completed'}
-            result = worker._execute_rollback()
-            assert result is True
+        mock_wmill = sys.modules['wmill']
+        mock_wmill.run_script_by_path.return_value = {'status': 'completed'}
+        result = worker._execute_rollback()
+        assert result is True
 
     def test_rollback_to_best_no_best_trial_fails(self):
         worker = self._create_worker_for_rollback(target_state='best', best_trials=[])
@@ -362,10 +362,10 @@ class TestExecuteRollback:
 
     def test_rollback_to_baseline_empty_params(self):
         worker = self._create_worker_for_rollback(target_state='baseline')
-        with patch('engine.breeder_worker.wmill') as mock_wmill:
-            mock_wmill.run_script_by_path.return_value = {'status': 'completed'}
-            result = worker._execute_rollback()
-            assert result is True
+        mock_wmill = sys.modules['wmill']
+        mock_wmill.run_script_by_path.return_value = {'status': 'completed'}
+        result = worker._execute_rollback()
+        assert result is True
 
     def test_rollback_to_previous_no_params_fails(self):
         worker = self._create_worker_for_rollback(last_successful_params=None)
@@ -381,10 +381,10 @@ class TestExecuteRollback:
         worker = self._create_worker_for_rollback(
             on_failure='stop', last_successful_params={'p': 1}
         )
-        with patch('engine.breeder_worker.wmill') as mock_wmill:
-            mock_wmill.run_script_by_path.side_effect = Exception('SSH failed')
-            with pytest.raises(Exception, match='SSH failed'):
-                worker._execute_rollback()
+        mock_wmill = sys.modules['wmill']
+        mock_wmill.run_script_by_path.side_effect = Exception('SSH failed')
+        with pytest.raises(Exception, match='SSH failed'):
+            worker._execute_rollback()
 
         state = worker._get_rollback_state()
         assert state['state'] == 'failed'
@@ -393,10 +393,10 @@ class TestExecuteRollback:
         worker = self._create_worker_for_rollback(
             on_failure='continue', last_successful_params={'p': 1}
         )
-        with patch('engine.breeder_worker.wmill') as mock_wmill:
-            mock_wmill.run_script_by_path.side_effect = Exception('SSH failed')
-            result = worker._execute_rollback()
-            assert result is False
+        mock_wmill = sys.modules['wmill']
+        mock_wmill.run_script_by_path.side_effect = Exception('SSH failed')
+        result = worker._execute_rollback()
+        assert result is False
 
         state = worker._get_rollback_state()
         assert state['state'] == 'failed'
@@ -405,28 +405,28 @@ class TestExecuteRollback:
         worker = self._create_worker_for_rollback(
             on_failure='skip_target', last_successful_params={'p': 1}
         )
-        with patch('engine.breeder_worker.wmill') as mock_wmill:
-            mock_wmill.run_script_by_path.side_effect = Exception('SSH failed')
-            result = worker._execute_rollback()
-            assert result is False
+        mock_wmill = sys.modules['wmill']
+        mock_wmill.run_script_by_path.side_effect = Exception('SSH failed')
+        result = worker._execute_rollback()
+        assert result is False
 
         state = worker._get_rollback_state()
         assert state['state'] == 'skip_target'
 
     def test_rollback_metrics_pushed_on_success(self):
         worker = self._create_worker_for_rollback(last_successful_params={'p': 1})
-        with patch('engine.breeder_worker.wmill') as mock_wmill:
-            mock_wmill.run_script_by_path.return_value = {'status': 'completed'}
-            worker._execute_rollback()
-            worker.metrics.inc_rollback.assert_called_with('success')
-            worker.metrics.push.assert_called()
+        mock_wmill = sys.modules['wmill']
+        mock_wmill.run_script_by_path.return_value = {'status': 'completed'}
+        worker._execute_rollback()
+        worker.metrics.inc_rollback.assert_called_with('success')
+        worker.metrics.push.assert_called()
 
     def test_rollback_metrics_pushed_on_failure(self):
         worker = self._create_worker_for_rollback(
             on_failure='continue', last_successful_params={'p': 1}
         )
-        with patch('engine.breeder_worker.wmill') as mock_wmill:
-            mock_wmill.run_script_by_path.side_effect = Exception('fail')
-            worker._execute_rollback()
-            worker.metrics.inc_rollback.assert_called_with('failed')
-            worker.metrics.push.assert_called()
+        mock_wmill = sys.modules['wmill']
+        mock_wmill.run_script_by_path.side_effect = Exception('fail')
+        worker._execute_rollback()
+        worker.metrics.inc_rollback.assert_called_with('failed')
+        worker.metrics.push.assert_called()

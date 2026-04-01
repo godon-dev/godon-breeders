@@ -348,12 +348,14 @@ class TestPrometheusQueryWithRetry:
     def test_succeeds_on_first_attempt(self):
         from reconnaissance.prometheus import prometheus_query_with_retry
         from unittest.mock import MagicMock
+        import reconnaissance.prometheus as prom_module
 
         prom_conn = MagicMock()
         expected = {'resultType': 'scalar', 'result': [1, '42.0']}
         prom_conn.custom_query.return_value = expected
 
-        with patch('reconnaissance.prometheus.time'):
+        with patch('reconnaissance.prometheus.time'), \
+             patch.object(prom_module, 'PrometheusApiClientException', Exception):
             result = prometheus_query_with_retry(prom_conn, 'up')
 
         assert result == expected
@@ -362,6 +364,7 @@ class TestPrometheusQueryWithRetry:
     def test_retries_on_connection_error(self):
         from reconnaissance.prometheus import prometheus_query_with_retry
         from requests.exceptions import ConnectionError
+        import reconnaissance.prometheus as prom_module
 
         prom_conn = MagicMock()
         prom_conn.custom_query.side_effect = [
@@ -369,7 +372,8 @@ class TestPrometheusQueryWithRetry:
             {'resultType': 'scalar', 'result': [1, '42.0']},
         ]
 
-        with patch('reconnaissance.prometheus.time'):
+        with patch('reconnaissance.prometheus.time'), \
+             patch.object(prom_module, 'PrometheusApiClientException', Exception):
             result = prometheus_query_with_retry(prom_conn, 'up', max_retries=3, initial_delay=1)
 
         assert result['result'][1] == '42.0'
@@ -378,6 +382,7 @@ class TestPrometheusQueryWithRetry:
     def test_retries_on_timeout(self):
         from reconnaissance.prometheus import prometheus_query_with_retry
         from requests.exceptions import Timeout
+        import reconnaissance.prometheus as prom_module
 
         prom_conn = MagicMock()
         prom_conn.custom_query.side_effect = [
@@ -386,7 +391,8 @@ class TestPrometheusQueryWithRetry:
             {'resultType': 'scalar', 'result': [1, '42.0']},
         ]
 
-        with patch('reconnaissance.prometheus.time'):
+        with patch('reconnaissance.prometheus.time'), \
+             patch.object(prom_module, 'PrometheusApiClientException', Exception):
             result = prometheus_query_with_retry(prom_conn, 'up', max_retries=3, initial_delay=1)
 
         assert prom_conn.custom_query.call_count == 3
@@ -394,26 +400,31 @@ class TestPrometheusQueryWithRetry:
     def test_raises_after_exhausted_retries(self):
         from reconnaissance.prometheus import prometheus_query_with_retry
         from requests.exceptions import ConnectionError
+        import reconnaissance.prometheus as prom_module
 
         prom_conn = MagicMock()
         prom_conn.custom_query.side_effect = ConnectionError("refused")
 
         with patch('reconnaissance.prometheus.time'), \
+             patch.object(prom_module, 'PrometheusApiClientException', Exception), \
              pytest.raises(Exception, match="failed after 2 retries"):
             prometheus_query_with_retry(prom_conn, 'up', max_retries=2, initial_delay=1)
 
     def test_non_retryable_error_raises_immediately(self):
         from reconnaissance.prometheus import prometheus_query_with_retry
+        import reconnaissance.prometheus as prom_module
 
         prom_conn = MagicMock()
         prom_conn.custom_query.side_effect = RuntimeError("unexpected")
 
-        with pytest.raises(RuntimeError, match="unexpected"):
+        with patch.object(prom_module, 'PrometheusApiClientException', Exception), \
+             pytest.raises(RuntimeError, match="unexpected"):
             prometheus_query_with_retry(prom_conn, 'up', max_retries=3)
 
     def test_exponential_backoff_delay(self):
         from reconnaissance.prometheus import prometheus_query_with_retry
         from requests.exceptions import ConnectionError
+        import reconnaissance.prometheus as prom_module
 
         prom_conn = MagicMock()
         prom_conn.custom_query.side_effect = [
@@ -422,7 +433,8 @@ class TestPrometheusQueryWithRetry:
             {'resultType': 'scalar', 'result': [1, '42.0']},
         ]
 
-        with patch('reconnaissance.prometheus.time') as mock_time:
+        with patch('reconnaissance.prometheus.time') as mock_time, \
+             patch.object(prom_module, 'PrometheusApiClientException', Exception):
             prometheus_query_with_retry(prom_conn, 'up', max_retries=3, initial_delay=5)
             sleep_calls = [c[0][0] for c in mock_time.sleep.call_args_list]
             assert sleep_calls == [5, 10]

@@ -32,14 +32,14 @@ class TestProbabilisticStrategy:
 
 class TestBestStrategy:
     def _setup_study_with_trials(self, trial_values):
+        from optuna.trial import TrialState
         study = MagicMock()
         completed_trials = []
         for i, val in enumerate(trial_values):
             t = MagicMock()
-            t.state = MagicMock()
+            t.state = TrialState.COMPLETE
             t.values = [val]
             completed_trials.append(t)
-        from optuna.trial import TrialState
         study.trials = completed_trials
         return study
 
@@ -93,8 +93,15 @@ class TestWorstStrategy:
             bottom_percentile=0.2,
             min_trials_for_filtering=5,
         )
+        from optuna.trial import TrialState
         study = MagicMock()
-        study.trials = [MagicMock(values=[1.0])] * 10
+        mock_trials = []
+        for _ in range(10):
+            t = MagicMock()
+            t.state = TrialState.COMPLETE
+            t.values = [1.0]
+            mock_trials.append(t)
+        study.trials = mock_trials
         trial = MagicMock()
         trial.values = [0.1]
 
@@ -108,8 +115,15 @@ class TestWorstStrategy:
             bottom_percentile=0.2,
             min_trials_for_filtering=5,
         )
+        from optuna.trial import TrialState
         study = MagicMock()
-        study.trials = [MagicMock(values=[1.0])] * 10
+        mock_trials = []
+        for _ in range(10):
+            t = MagicMock()
+            t.state = TrialState.COMPLETE
+            t.values = [1.0]
+            mock_trials.append(t)
+        study.trials = mock_trials
         trial = MagicMock()
         trial.values = [0.5]
 
@@ -126,8 +140,15 @@ class TestExtremesStrategy:
             bottom_percentile=0.2,
             min_trials_for_filtering=5,
         )
+        from optuna.trial import TrialState
         study = MagicMock()
-        study.trials = [MagicMock(values=[1.0])] * 10
+        mock_trials = []
+        for _ in range(10):
+            t = MagicMock()
+            t.state = TrialState.COMPLETE
+            t.values = [1.0]
+            mock_trials.append(t)
+        study.trials = mock_trials
         trial = MagicMock()
         trial.values = [0.1]
 
@@ -142,8 +163,15 @@ class TestExtremesStrategy:
             bottom_percentile=0.2,
             min_trials_for_filtering=5,
         )
+        from optuna.trial import TrialState
         study = MagicMock()
-        study.trials = [MagicMock(values=[1.0])] * 10
+        mock_trials = []
+        for _ in range(10):
+            t = MagicMock()
+            t.state = TrialState.COMPLETE
+            t.values = [1.0]
+            mock_trials.append(t)
+        study.trials = mock_trials
         trial = MagicMock()
         trial.values = [0.5]
 
@@ -158,8 +186,15 @@ class TestExtremesStrategy:
             bottom_percentile=0.2,
             min_trials_for_filtering=5,
         )
+        from optuna.trial import TrialState
         study = MagicMock()
-        study.trials = [MagicMock(values=[1.0])] * 10
+        mock_trials = []
+        for _ in range(10):
+            t = MagicMock()
+            t.state = TrialState.COMPLETE
+            t.values = [1.0]
+            mock_trials.append(t)
+        study.trials = mock_trials
         trial = MagicMock()
         trial.values = [0.5]
 
@@ -170,8 +205,15 @@ class TestExtremesStrategy:
 class TestUnknownStrategy:
     def test_unknown_strategy_defaults_to_share(self):
         cb = CommunicationCallback(storage="sqlite:///test.db", share_strategy="unknown")
+        from optuna.trial import TrialState
         study = MagicMock()
-        study.trials = [MagicMock(values=[1.0])] * 10
+        mock_trials = []
+        for _ in range(10):
+            t = MagicMock()
+            t.state = TrialState.COMPLETE
+            t.values = [1.0]
+            mock_trials.append(t)
+        study.trials = mock_trials
         trial = MagicMock()
         trial.values = [5.0]
 
@@ -209,8 +251,8 @@ class TestShareTrial:
     def test_share_within_breeder_false_skips_same_breeder(self):
         cb = CommunicationCallback(storage="sqlite:///test.db", share_within_breeder=False)
         study = MagicMock()
-        study.study_name = 'breeder_a_tpe_study'
-        study.get_all_study_names.return_value = ['breeder_a_tpe_study', 'breeder_a_nsga2_study', 'breeder_b_tpe_study']
+        study.study_name = 'alpha_tpe_study'
+        study.get_all_study_names.return_value = ['alpha_tpe_study', 'alpha_nsga2_study', 'beta_tpe_study']
 
         cooperating = MagicMock()
         trial = MagicMock()
@@ -220,7 +262,7 @@ class TestShareTrial:
             cb._share_trial(study, trial)
             mock_load.assert_called_once()
             called_study_name = mock_load.call_args[1]['study_name']
-            assert called_study_name == 'breeder_b_tpe_study'
+            assert called_study_name == 'beta_tpe_study'
 
     def test_handles_share_failure_gracefully(self):
         cb = CommunicationCallback(storage="sqlite:///test.db", share_within_breeder=True)

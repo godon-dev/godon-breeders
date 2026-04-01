@@ -181,8 +181,10 @@ class TestSuggestParams:
 class TestValidateConfig:
     def test_delegates_to_preflight(self):
         config = {'settings': {'sysctl': {}}}
-        with patch('strains.linux_performance.strain.preflight') as mock_preflight:
-            mock_preflight.main.return_value = {'result': 'SUCCESS'}
+        mock_preflight = MagicMock()
+        mock_preflight.main.return_value = {'result': 'SUCCESS'}
+        parent_mod = sys.modules['f.breeder.strains.linux_performance']
+        with patch.object(parent_mod, 'preflight', mock_preflight, create=True):
             result = validate_config(config)
             mock_preflight.main.assert_called_once_with(config)
             assert result['result'] == 'SUCCESS'

@@ -62,53 +62,49 @@ class TestExecuteTrial:
     def test_success_returns_metrics(self):
         worker = _create_worker()
         settings = {'vm.swappiness': 10}
+        mock_wmill = sys.modules['wmill']
+        mock_wmill.run_script_by_path.side_effect = [
+            {'status': 'completed'},
+            {'status': 'completed', 'metrics': {'throughput': 42.5}},
+        ]
 
-        with patch('engine.breeder_worker.wmill') as mock_wmill:
-            mock_wmill.run_script_by_path.side_effect = [
-                {'status': 'completed'},
-                {'status': 'completed', 'metrics': {'throughput': 42.5}},
-            ]
-
-            result = worker._execute_trial(settings)
-            assert result == {'throughput': 42.5}
-            assert mock_wmill.run_script_by_path.call_count == 2
+        result = worker._execute_trial(settings)
+        assert result == {'throughput': 42.5}
+        assert mock_wmill.run_script_by_path.call_count == 2
 
     def test_effectuation_failure_returns_inf(self):
         worker = _create_worker()
         settings = {'vm.swappiness': 10}
-
-        with patch('engine.breeder_worker.wmill') as mock_wmill:
-            mock_wmill.run_script_by_path.side_effect = Exception('SSH failed')
-
-            result = worker._execute_trial(settings)
-            assert result == {'throughput': float('inf')}
+        mock_wmill = sys.modules['wmill']
+        mock_wmill.run_script_by_path.side_effect = Exception('SSH failed')
+        result = worker._execute_trial(settings)
+        assert result == {'throughput': float('inf')}
 
     def test_no_metrics_returns_inf(self):
         worker = _create_worker()
         settings = {}
 
-        with patch('engine.breeder_worker.wmill') as mock_wmill:
-            mock_wmill.run_script_by_path.side_effect = [
-                {'status': 'completed'},
-                {'status': 'completed'},
-            ]
+        mock_wmill = sys.modules['wmill']
+        mock_wmill.run_script_by_path.side_effect = [
+            {'status': 'completed'},
+            {'status': 'completed'},
+        ]
 
-            result = worker._execute_trial(settings)
-            assert result == {'throughput': float('inf')}
+        result = worker._execute_trial(settings)
+        assert result == {'throughput': float('inf')}
 
     def test_uses_configured_effectuation_type(self):
         worker = _create_worker(effectuation={'targets': [], 'type': 'http'})
         settings = {}
 
-        with patch('engine.breeder_worker.wmill') as mock_wmill:
-            mock_wmill.run_script_by_path.side_effect = [
-                {'status': 'completed'},
-                {'status': 'completed', 'metrics': {'throughput': 10.0}},
-            ]
-
-            worker._execute_trial(settings)
-            eff_call = mock_wmill.run_script_by_path.call_args_list[0]
-            assert eff_call[0][0] == 'f/effectuation/http'
+        mock_wmill = sys.modules['wmill']
+        mock_wmill.run_script_by_path.side_effect = [
+            {'status': 'completed'},
+            {'status': 'completed', 'metrics': {'throughput': 10.0}},
+        ]
+        worker._execute_trial(settings)
+        eff_call = mock_wmill.run_script_by_path.call_args_list[0]
+        assert eff_call[0][0] == 'f/effectuation/http'
 
 
 class TestShouldContinue:
@@ -348,6 +344,9 @@ class TestRunLoop:
 
         worker.study.tell = fake_tell
         worker.study.trials = real_trials
+        best_mock = MagicMock()
+        best_mock.number = -1
+        worker.study.best_trials = [best_mock]
 
         return worker
 
