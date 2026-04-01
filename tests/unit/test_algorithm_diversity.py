@@ -32,15 +32,15 @@ sys.modules['optuna.storages'] = MagicMock()
 sys.modules['optuna.trial'] = MagicMock()
 sys.modules['optuna.samplers'] = MagicMock()
 
-from linux_performance.breeder_worker import BreederWorker
+from engine.breeder_worker import BreederWorker
 
 
 class TestSamplerAssignment:
     """Test sampler assignment logic for algorithm diversity"""
     
-    @patch('linux_performance.breeder_worker.BreederWorker._load_or_create_study')
-    @patch('linux_performance.breeder_worker.BreederWorker._setup_communication')
-    @patch('linux_performance.breeder_worker.BreederWorker._update_state')
+    @patch('engine.breeder_worker.BreederWorker._load_or_create_study')
+    @patch('engine.breeder_worker.BreederWorker._setup_communication')
+    @patch('engine.breeder_worker.BreederWorker._update_state')
     def test_single_worker_gets_tpe_sampler(self, mock_update, mock_comm, mock_study):
         """Test that single worker configuration defaults to TPE sampler"""
         config = {
@@ -61,9 +61,9 @@ class TestSamplerAssignment:
         
         assert worker.sampler_type == 'tpe', "Single worker should use TPE sampler"
     
-    @patch('linux_performance.breeder_worker.BreederWorker._load_or_create_study')
-    @patch('linux_performance.breeder_worker.BreederWorker._setup_communication')
-    @patch('linux_performance.breeder_worker.BreederWorker._update_state')
+    @patch('engine.breeder_worker.BreederWorker._load_or_create_study')
+    @patch('engine.breeder_worker.BreederWorker._setup_communication')
+    @patch('engine.breeder_worker.BreederWorker._update_state')
     def test_multiple_workers_get_different_samplers(self, mock_update, mock_comm, mock_study):
         """Test that multiple workers get assigned different samplers"""
         config = {
@@ -95,9 +95,9 @@ class TestSamplerAssignment:
         for sampler_type in sampler_types:
             assert sampler_type in valid_samplers, f"Invalid sampler type: {sampler_type}"
     
-    @patch('linux_performance.breeder_worker.BreederWorker._load_or_create_study')
-    @patch('linux_performance.breeder_worker.BreederWorker._setup_communication')
-    @patch('linux_performance.breeder_worker.BreederWorker._update_state')
+    @patch('engine.breeder_worker.BreederWorker._load_or_create_study')
+    @patch('engine.breeder_worker.BreederWorker._setup_communication')
+    @patch('engine.breeder_worker.BreederWorker._update_state')
     def test_sampler_assignment_is_deterministic(self, mock_update, mock_comm, mock_study):
         """Test that same worker_id always gets same sampler"""
         config = {
@@ -125,9 +125,9 @@ class TestSamplerAssignment:
 class TestSamplerCreation:
     """Test sampler parameter randomization"""
     
-    @patch('linux_performance.breeder_worker.BreederWorker._load_or_create_study')
-    @patch('linux_performance.breeder_worker.BreederWorker._setup_communication')
-    @patch('linux_performance.breeder_worker.BreederWorker._update_state')
+    @patch('engine.breeder_worker.BreederWorker._load_or_create_study')
+    @patch('engine.breeder_worker.BreederWorker._setup_communication')
+    @patch('engine.breeder_worker.BreederWorker._update_state')
     def test_tpe_sampler_gets_randomized_config(self, mock_update, mock_comm, mock_study):
         """Test that TPE sampler gets randomized parameters"""
         config = {
@@ -146,18 +146,18 @@ class TestSamplerCreation:
         # Force TPE sampler for this test
         worker.sampler_type = 'tpe'
         
-        with patch('linux_performance.breeder_worker.random.choice') as mock_random:
+        with patch('engine.breeder_worker.random.choice') as mock_random:
             mock_random.side_effect = [(True, False), True, 10]  # (multivariate, group), constant_liar, n_startup
             
-            with patch('linux_performance.breeder_worker.TPESampler') as mock_tpe:
+            with patch('engine.breeder_worker.TPESampler') as mock_tpe:
                 worker._create_sampler('tpe')
                 
                 # Check that TPESampler was called with randomized config
                 assert mock_tpe.called, "TPESampler should be instantiated"
     
-    @patch('linux_performance.breeder_worker.BreederWorker._load_or_create_study')
-    @patch('linux_performance.breeder_worker.BreederWorker._setup_communication')
-    @patch('linux_performance.breeder_worker.BreederWorker._update_state')
+    @patch('engine.breeder_worker.BreederWorker._load_or_create_study')
+    @patch('engine.breeder_worker.BreederWorker._setup_communication')
+    @patch('engine.breeder_worker.BreederWorker._update_state')
     def test_nsga2_sampler_gets_randomized_config(self, mock_update, mock_comm, mock_study):
         """Test that NSGA2 sampler gets randomized parameters"""
         config = {
@@ -176,11 +176,11 @@ class TestSamplerCreation:
         # Force NSGA2 sampler for this test
         worker.sampler_type = 'nsga2'
         
-        with patch('linux_performance.breeder_worker.random.choice') as mock_random:
+        with patch('engine.breeder_worker.random.choice') as mock_random:
             # population_size, mutation_prob, crossover_prob, crossover
             mock_random.side_effect = [50, 0.1, 0.9, 'uniform']
             
-            with patch('linux_performance.breeder_worker.NSGAIISampler') as mock_nsga2:
+            with patch('engine.breeder_worker.NSGAIISampler') as mock_nsga2:
                 worker._create_sampler('nsga2')
                 
                 assert mock_nsga2.called, "NSGAIISampler should be instantiated"
@@ -189,9 +189,9 @@ class TestSamplerCreation:
 class TestStudyNaming:
     """Test study naming for multi-study architecture"""
     
-    @patch('linux_performance.breeder_worker.BreederWorker._setup_communication')
-    @patch('linux_performance.breeder_worker.BreederWorker._update_state')
-    @patch('linux_performance.breeder_worker.optuna')
+    @patch('engine.breeder_worker.BreederWorker._setup_communication')
+    @patch('engine.breeder_worker.BreederWorker._update_state')
+    @patch('engine.breeder_worker.optuna')
     def test_single_worker_creates_single_study(self, mock_optuna, mock_update, mock_comm):
         """Test that single worker creates standard study name"""
         config = {
@@ -216,9 +216,9 @@ class TestStudyNaming:
         # Check study name doesn't include sampler type
         assert '_study' in str(mock_optuna.create_study.call_args)
     
-    @patch('linux_performance.breeder_worker.BreederWorker._setup_communication')
-    @patch('linux_performance.breeder_worker.BreederWorker._update_state')
-    @patch('linux_performance.breeder_worker.optuna')
+    @patch('engine.breeder_worker.BreederWorker._setup_communication')
+    @patch('engine.breeder_worker.BreederWorker._update_state')
+    @patch('engine.breeder_worker.optuna')
     def test_multiple_workers_create_sampler_specific_studies(self, mock_optuna, mock_update, mock_comm):
         """Test that multiple workers create sampler-specific study names"""
         config = {
@@ -250,7 +250,7 @@ class TestCommunicationCallback:
     
     def test_share_within_breeder_flag_for_parallel_workers(self):
         """Test that parallel workers enable share_within_breeder"""
-        from linux_performance.breeder_worker import CommunicationCallback
+        from engine.breeder_worker import CommunicationCallback
         
         callback = CommunicationCallback(
             storage="test_storage",
@@ -260,8 +260,8 @@ class TestCommunicationCallback:
         
         assert callback.share_within_breeder == True
     
-    @patch('linux_performance.breeder_worker.BreederWorker._load_or_create_study')
-    @patch('linux_performance.breeder_worker.BreederWorker._update_state')
+    @patch('engine.breeder_worker.BreederWorker._load_or_create_study')
+    @patch('engine.breeder_worker.BreederWorker._update_state')
     def test_parallel_workers_enables_intra_breeder_sharing(self, mock_update, mock_study):
         """Test that parallel worker configuration enables share_within_breeder"""
         config = {

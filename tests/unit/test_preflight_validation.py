@@ -35,7 +35,7 @@ class TestPreflightValidation:
     def test_missing_config_returns_failure(self):
         """Test that missing config parameter returns failure"""
         # Import after mocking
-        from linux_performance import preflight
+        from strains.linux_performance import preflight
         
         result = preflight.main(config=None)
         
@@ -44,7 +44,7 @@ class TestPreflightValidation:
 
     def test_valid_sysctl_config_passes(self):
         """Test that valid sysctl configuration passes preflight"""
-        from linux_performance import preflight
+        from strains.linux_performance import preflight
         
         config = {
             'settings': {
@@ -65,7 +65,7 @@ class TestPreflightValidation:
 
     def test_valid_sysfs_config_passes(self):
         """Test that valid sysfs configuration passes preflight"""
-        from linux_performance import preflight
+        from strains.linux_performance import preflight
         
         config = {
             'settings': {
@@ -85,7 +85,7 @@ class TestPreflightValidation:
 
     def test_valid_cpufreq_config_passes(self):
         """Test that valid cpufreq configuration passes preflight"""
-        from linux_performance import preflight
+        from strains.linux_performance import preflight
         
         config = {
             'settings': {
@@ -105,7 +105,7 @@ class TestPreflightValidation:
 
     def test_valid_ethtool_config_passes(self):
         """Test that valid ethtool configuration passes preflight"""
-        from linux_performance import preflight
+        from strains.linux_performance import preflight
         
         config = {
             'settings': {
@@ -132,7 +132,7 @@ class TestPreflightValidation:
 
     def test_unsupported_sysctl_parameter_fails(self):
         """Test that unsupported sysctl parameter fails preflight"""
-        from linux_performance import preflight
+        from strains.linux_performance import preflight
         
         config = {
             'settings': {
@@ -153,7 +153,7 @@ class TestPreflightValidation:
 
     def test_unsupported_sysfs_parameter_fails(self):
         """Test that unsupported sysfs parameter fails preflight"""
-        from linux_performance import preflight
+        from strains.linux_performance import preflight
         
         config = {
             'settings': {
@@ -174,7 +174,7 @@ class TestPreflightValidation:
 
     def test_unsupported_ethtool_parameter_fails(self):
         """Test that unsupported ethtool parameter fails preflight"""
-        from linux_performance import preflight
+        from strains.linux_performance import preflight
         
         config = {
             'settings': {
@@ -197,7 +197,7 @@ class TestPreflightValidation:
 
     def test_categorical_parameter_with_wrong_constraint_type_fails(self):
         """Test that categorical parameter with range constraints fails"""
-        from linux_performance import preflight
+        from strains.linux_performance import preflight
         
         config = {
             'settings': {
@@ -218,7 +218,7 @@ class TestPreflightValidation:
 
     def test_integer_parameter_with_wrong_constraint_type_fails(self):
         """Test that integer parameter with categorical constraints fails"""
-        from linux_performance import preflight
+        from strains.linux_performance import preflight
         
         config = {
             'settings': {
@@ -239,7 +239,7 @@ class TestPreflightValidation:
 
     def test_missing_constraints_fails(self):
         """Test that missing constraints field fails preflight"""
-        from linux_performance import preflight
+        from strains.linux_performance import preflight
         
         config = {
             'settings': {
@@ -258,7 +258,7 @@ class TestPreflightValidation:
 
     def test_constraints_dict_without_values_fails(self):
         """Test that dict constraints without 'values' key fail preflight"""
-        from linux_performance import preflight
+        from strains.linux_performance import preflight
 
         config = {
             'settings': {
@@ -277,7 +277,7 @@ class TestPreflightValidation:
 
     def test_constraints_dict_with_values_succeeds(self):
         """Test that dict constraints with 'values' key pass for categorical params"""
-        from linux_performance import preflight
+        from strains.linux_performance import preflight
 
         config = {
             'settings': {
@@ -295,7 +295,7 @@ class TestPreflightValidation:
 
     def test_multiple_categories_all_valid(self):
         """Test that config with multiple categories all valid passes"""
-        from linux_performance import preflight
+        from strains.linux_performance import preflight
         
         config = {
             'settings': {
@@ -330,7 +330,7 @@ class TestPreflightValidation:
 
     def test_multiple_errors_aggregated(self):
         """Test that multiple validation errors are aggregated"""
-        from linux_performance import preflight
+        from strains.linux_performance import preflight
         
         config = {
             'settings': {

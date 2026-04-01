@@ -13,14 +13,14 @@ import pytest
 # Mock prometheus_client before importing the code under test
 sys.modules['prometheus_client'] = MagicMock()
 
-from linux_performance.breeder_metrics_client import BreederMetricsClient
+from engine.breeder_metrics_client import BreederMetricsClient
 
 
 class TestBreederMetricsClientInitialization:
     """Test BreederMetricsClient initialization and configuration"""
 
-    @patch('linux_performance.breeder_metrics_client.push_to_gateway')
-    @patch('linux_performance.breeder_metrics_client.CollectorRegistry')
+    @patch('engine.breeder_metrics_client.push_to_gateway')
+    @patch('engine.breeder_metrics_client.CollectorRegistry')
     def test_initialization_enabled(self, mock_registry, mock_push):
         """Test client initializes correctly when enabled"""
         mock_registry_instance = MagicMock()
@@ -43,7 +43,7 @@ class TestBreederMetricsClientInitialization:
         mock_registry.assert_called_once()
 
     @patch.dict(os.environ, {'PUSH_METRICS_ENABLED': 'false'})
-    @patch('linux_performance.breeder_metrics_client.CollectorRegistry')
+    @patch('engine.breeder_metrics_client.CollectorRegistry')
     def test_initialization_disabled(self, mock_registry):
         """Test client respects PUSH_METRICS_ENABLED=false"""
         import os
@@ -63,11 +63,11 @@ class TestBreederMetricsClientInitialization:
 class TestMetricCreation:
     """Test that Prometheus metrics are created with correct configuration"""
 
-    @patch('linux_performance.breeder_metrics_client.push_to_gateway')
-    @patch('linux_performance.breeder_metrics_client.CollectorRegistry')
-    @patch('linux_performance.breeder_metrics_client.Gauge')
-    @patch('linux_performance.breeder_metrics_client.Counter')
-    @patch('linux_performance.breeder_metrics_client.Histogram')
+    @patch('engine.breeder_metrics_client.push_to_gateway')
+    @patch('engine.breeder_metrics_client.CollectorRegistry')
+    @patch('engine.breeder_metrics_client.Gauge')
+    @patch('engine.breeder_metrics_client.Counter')
+    @patch('engine.breeder_metrics_client.Histogram')
     def test_worker_status_metric_created(self, mock_histogram, mock_counter, mock_gauge, mock_registry, mock_push):
         """Test worker status Gauge metric is created"""
         mock_registry_instance = MagicMock()
@@ -89,9 +89,9 @@ class TestMetricCreation:
         gauge_calls = [str(call) for call in mock_gauge.call_args_list]
         assert any('godon_breeder_worker_status' in str(call) for call in gauge_calls)
 
-    @patch('linux_performance.breeder_metrics_client.push_to_gateway')
-    @patch('linux_performance.breeder_metrics_client.CollectorRegistry')
-    @patch('linux_performance.breeder_metrics_client.Counter')
+    @patch('engine.breeder_metrics_client.push_to_gateway')
+    @patch('engine.breeder_metrics_client.CollectorRegistry')
+    @patch('engine.breeder_metrics_client.Counter')
     def test_trial_counter_metric_created(self, mock_counter, mock_registry, mock_push):
         """Test trial counter is created"""
         mock_registry_instance = MagicMock()
@@ -111,9 +111,9 @@ class TestMetricCreation:
 class TestMetricMethods:
     """Test that metric methods correctly update metrics"""
 
-    @patch('linux_performance.breeder_metrics_client.push_to_gateway')
-    @patch('linux_performance.breeder_metrics_client.CollectorRegistry')
-    @patch('linux_performance.breeder_metrics_client.Counter')
+    @patch('engine.breeder_metrics_client.push_to_gateway')
+    @patch('engine.breeder_metrics_client.CollectorRegistry')
+    @patch('engine.breeder_metrics_client.Counter')
     def test_inc_trial(self, mock_counter, mock_registry, mock_push):
         """Test inc_trial increments counter"""
         mock_registry_instance = MagicMock()
@@ -135,9 +135,9 @@ class TestMetricMethods:
         mock_counter_instance.labels.assert_called_once()
         mock_counter_instance.labels.return_value.inc.assert_called_once()
 
-    @patch('linux_performance.breeder_metrics_client.push_to_gateway')
-    @patch('linux_performance.breeder_metrics_client.CollectorRegistry')
-    @patch('linux_performance.breeder_metrics_client.Gauge')
+    @patch('engine.breeder_metrics_client.push_to_gateway')
+    @patch('engine.breeder_metrics_client.CollectorRegistry')
+    @patch('engine.breeder_metrics_client.Gauge')
     def test_set_best_value(self, mock_gauge, mock_registry, mock_push):
         """Test set_best_value updates gauge"""
         mock_registry_instance = MagicMock()
@@ -159,9 +159,9 @@ class TestMetricMethods:
         mock_gauge_instance.labels.assert_called_once()
         mock_gauge_instance.labels.return_value.set.assert_called_with(0.123)
 
-    @patch('linux_performance.breeder_metrics_client.push_to_gateway')
-    @patch('linux_performance.breeder_metrics_client.CollectorRegistry')
-    @patch('linux_performance.breeder_metrics_client.Gauge')
+    @patch('engine.breeder_metrics_client.push_to_gateway')
+    @patch('engine.breeder_metrics_client.CollectorRegistry')
+    @patch('engine.breeder_metrics_client.Gauge')
     def test_mark_running_stopped(self, mock_gauge, mock_registry, mock_push):
         """Test mark_running and mark_stopped"""
         mock_registry_instance = MagicMock()
@@ -192,8 +192,8 @@ class TestMetricMethods:
 class TestPushToGateway:
     """Test that metrics are pushed to Push Gateway correctly"""
 
-    @patch('linux_performance.breeder_metrics_client.push_to_gateway')
-    @patch('linux_performance.breeder_metrics_client.CollectorRegistry')
+    @patch('engine.breeder_metrics_client.push_to_gateway')
+    @patch('engine.breeder_metrics_client.CollectorRegistry')
     def test_push_calls_pushgateway(self, mock_registry, mock_push):
         """Test push() calls prometheus push_to_gateway"""
         mock_registry_instance = MagicMock()
@@ -217,8 +217,8 @@ class TestPushToGateway:
         )
         assert result is True
 
-    @patch('linux_performance.breeder_metrics_client.push_to_gateway')
-    @patch('linux_performance.breeder_metrics_client.CollectorRegistry')
+    @patch('engine.breeder_metrics_client.push_to_gateway')
+    @patch('engine.breeder_metrics_client.CollectorRegistry')
     def test_push_disabled(self, mock_registry, mock_push):
         """Test push() does nothing when disabled"""
         # Create client with PUSH_METRICS_ENABLED=false via env
@@ -237,8 +237,8 @@ class TestPushToGateway:
             mock_push.assert_not_called()
             assert result is False
 
-    @patch('linux_performance.breeder_metrics_client.push_to_gateway')
-    @patch('linux_performance.breeder_metrics_client.CollectorRegistry')
+    @patch('engine.breeder_metrics_client.push_to_gateway')
+    @patch('engine.breeder_metrics_client.CollectorRegistry')
     def test_push_handles_errors(self, mock_registry, mock_push):
         """Test push() handles Push Gateway errors gracefully"""
         mock_registry_instance = MagicMock()
@@ -263,9 +263,9 @@ class TestPushToGateway:
 class TestRollbackCounter:
     """Test rollback counter functionality"""
 
-    @patch('linux_performance.breeder_metrics_client.push_to_gateway')
-    @patch('linux_performance.breeder_metrics_client.CollectorRegistry')
-    @patch('linux_performance.breeder_metrics_client.Counter')
+    @patch('engine.breeder_metrics_client.push_to_gateway')
+    @patch('engine.breeder_metrics_client.CollectorRegistry')
+    @patch('engine.breeder_metrics_client.Counter')
     def test_inc_rollback_success(self, mock_counter, mock_registry, mock_push):
         """Test rollback counter increments for successful rollback"""
         mock_registry_instance = MagicMock()
@@ -288,9 +288,9 @@ class TestRollbackCounter:
         labels_call = mock_counter_instance.labels.call_args
         assert 'success' in str(labels_call)
 
-    @patch('linux_performance.breeder_metrics_client.push_to_gateway')
-    @patch('linux_performance.breeder_metrics_client.CollectorRegistry')
-    @patch('linux_performance.breeder_metrics_client.Counter')
+    @patch('engine.breeder_metrics_client.push_to_gateway')
+    @patch('engine.breeder_metrics_client.CollectorRegistry')
+    @patch('engine.breeder_metrics_client.Counter')
     def test_inc_rollback_failed(self, mock_counter, mock_registry, mock_push):
         """Test rollback counter increments for failed rollback"""
         mock_registry_instance = MagicMock()
@@ -317,9 +317,9 @@ class TestRollbackCounter:
 class TestMetricLabels:
     """Test that metrics have correct labels"""
 
-    @patch('linux_performance.breeder_metrics_client.push_to_gateway')
-    @patch('linux_performance.breeder_metrics_client.CollectorRegistry')
-    @patch('linux_performance.breeder_metrics_client.Gauge')
+    @patch('engine.breeder_metrics_client.push_to_gateway')
+    @patch('engine.breeder_metrics_client.CollectorRegistry')
+    @patch('engine.breeder_metrics_client.Gauge')
     def test_metrics_include_common_labels(self, mock_gauge, mock_registry, mock_push):
         """Test all metrics include breeder_id, worker_id, breeder_type labels"""
         mock_registry_instance = MagicMock()
