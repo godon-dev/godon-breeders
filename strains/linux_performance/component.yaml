@@ -1,0 +1,22 @@
+name: linux_performance_strain
+target: breeder/strains/linux_performance
+workspace: godon
+
+scripts:
+  - pattern: "*.py"
+    settings:
+      summary: "Linux Performance Strain"
+      description: "Domain knowledge for Linux system parameter optimization - parameter registry, preflight validation, and suggestion logic"
+      tag: "breeder"
+
+  - pattern: "effectuate_settings.yml"
+    settings:
+      summary: "Linux Performance Parameters Effectuation Playbook"
+      description: "Ansible playbook for applying sysctl, sysfs, cpufreq, and ethtool parameters via SSH"
+      tag: "breeder"
+
+flows:
+  - pattern: "effectuation_flow.yaml"
+    settings:
+      summary: "Linux Performance Effectuation Flow"
+      description: "Orchestrates parameter application and metric gathering via generic effectuation and reconnaissance modules"

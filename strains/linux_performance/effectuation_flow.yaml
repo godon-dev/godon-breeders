@@ -32,7 +32,7 @@ value:
             expr: flow_input.targets
           playbook_path:
             type: static
-            value: "f/breeder/linux_performance/effectuate_settings"
+            value: "f/breeder/strains/linux_performance/effectuate_settings"
           playbook_vars:
             type: javascript
             expr: "flow_input.params"
