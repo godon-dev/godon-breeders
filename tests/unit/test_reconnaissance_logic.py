@@ -342,3 +342,192 @@ class TestGatherSingleMetric:
         assert result == float('inf')
         # Query should not be called for unsupported service
         mock_query.assert_not_called()
+
+
+class TestPrometheusQueryWithRetry:
+    _MockPromExc = type('PrometheusApiClientException', (Exception,), {})
+
+    def test_succeeds_on_first_attempt(self):
+        from reconnaissance.prometheus import prometheus_query_with_retry
+        from unittest.mock import MagicMock
+        import reconnaissance.prometheus as prom_module
+
+        prom_conn = MagicMock()
+        expected = {'resultType': 'scalar', 'result': [1, '42.0']}
+        prom_conn.custom_query.return_value = expected
+
+        with patch('reconnaissance.prometheus.time'), \
+             patch.object(prom_module, 'PrometheusApiClientException', self._MockPromExc):
+            result = prometheus_query_with_retry(prom_conn, 'up')
+
+        assert result == expected
+        prom_conn.custom_query.assert_called_once_with('up')
+
+    def test_retries_on_connection_error(self):
+        from reconnaissance.prometheus import prometheus_query_with_retry
+        from requests.exceptions import ConnectionError
+        import reconnaissance.prometheus as prom_module
+
+        prom_conn = MagicMock()
+        prom_conn.custom_query.side_effect = [
+            ConnectionError("refused"),
+            {'resultType': 'scalar', 'result': [1, '42.0']},
+        ]
+
+        with patch('reconnaissance.prometheus.time'), \
+             patch.object(prom_module, 'PrometheusApiClientException', self._MockPromExc):
+            result = prometheus_query_with_retry(prom_conn, 'up', max_retries=3, initial_delay=1)
+
+        assert result['result'][1] == '42.0'
+        assert prom_conn.custom_query.call_count == 2
+
+    def test_retries_on_timeout(self):
+        from reconnaissance.prometheus import prometheus_query_with_retry
+        from requests.exceptions import Timeout
+        import reconnaissance.prometheus as prom_module
+
+        prom_conn = MagicMock()
+        prom_conn.custom_query.side_effect = [
+            Timeout("timeout"),
+            Timeout("timeout"),
+            {'resultType': 'scalar', 'result': [1, '42.0']},
+        ]
+
+        with patch('reconnaissance.prometheus.time'), \
+             patch.object(prom_module, 'PrometheusApiClientException', self._MockPromExc):
+            result = prometheus_query_with_retry(prom_conn, 'up', max_retries=3, initial_delay=1)
+
+        assert prom_conn.custom_query.call_count == 3
+
+    def test_raises_after_exhausted_retries(self):
+        from reconnaissance.prometheus import prometheus_query_with_retry
+        from requests.exceptions import ConnectionError
+        import reconnaissance.prometheus as prom_module
+
+        prom_conn = MagicMock()
+        prom_conn.custom_query.side_effect = ConnectionError("refused")
+
+        with patch('reconnaissance.prometheus.time'), \
+             patch.object(prom_module, 'PrometheusApiClientException', self._MockPromExc), \
+             pytest.raises(Exception, match="failed after 2 retries"):
+            prometheus_query_with_retry(prom_conn, 'up', max_retries=2, initial_delay=1)
+
+    def test_non_retryable_error_raises_immediately(self):
+        from reconnaissance.prometheus import prometheus_query_with_retry
+        import reconnaissance.prometheus as prom_module
+
+        prom_conn = MagicMock()
+        prom_conn.custom_query.side_effect = RuntimeError("unexpected")
+
+        with patch.object(prom_module, 'PrometheusApiClientException', self._MockPromExc), \
+             pytest.raises(RuntimeError, match="unexpected"):
+            prometheus_query_with_retry(prom_conn, 'up', max_retries=3)
+
+    def test_exponential_backoff_delay(self):
+        from reconnaissance.prometheus import prometheus_query_with_retry
+        from requests.exceptions import ConnectionError
+        import reconnaissance.prometheus as prom_module
+
+        prom_conn = MagicMock()
+        prom_conn.custom_query.side_effect = [
+            ConnectionError("fail"),
+            ConnectionError("fail"),
+            {'resultType': 'scalar', 'result': [1, '42.0']},
+        ]
+
+        with patch('reconnaissance.prometheus.time') as mock_time, \
+             patch.object(prom_module, 'PrometheusApiClientException', self._MockPromExc):
+            prometheus_query_with_retry(prom_conn, 'up', max_retries=3, initial_delay=5)
+            sleep_calls = [c[0][0] for c in mock_time.sleep.call_args_list]
+            assert sleep_calls == [5, 10]
+
+
+class TestReconnaissanceMain:
+    def test_gathers_objective_metrics(self):
+        from reconnaissance.prometheus import main as recon_main
+
+        with patch('reconnaissance.prometheus.PrometheusConnect') as mock_prom_cls, \
+             patch('reconnaissance.prometheus._gather_single_metric', return_value=42.5) as mock_gather:
+            mock_prom_cls.return_value = MagicMock()
+
+            context = {
+                'reconnaissance': {
+                    'prometheus': {'url': 'http://prom:9090'}
+                },
+                'objectives': [
+                    {
+                        'name': 'throughput',
+                        'reconnaissance': {'service': 'prometheus', 'query': 'rate(http_total[5m])'}
+                    }
+                ],
+                'guardrails': []
+            }
+
+            result = recon_main(context, [], {})
+            assert result['status'] == 'completed'
+            assert result['metrics']['throughput'] == 42.5
+
+    def test_gathers_guardrail_metrics(self):
+        from reconnaissance.prometheus import main as recon_main
+
+        with patch('reconnaissance.prometheus.PrometheusConnect') as mock_prom_cls, \
+             patch('reconnaissance.prometheus._gather_single_metric', return_value=85.0):
+            mock_prom_cls.return_value = MagicMock()
+
+            context = {
+                'reconnaissance': {
+                    'prometheus': {'url': 'http://prom:9090'}
+                },
+                'objectives': [],
+                'guardrails': [
+                    {
+                        'name': 'cpu_usage',
+                        'reconnaissance': {'service': 'prometheus', 'query': 'cpu_percent'}
+                    }
+                ]
+            }
+
+            result = recon_main(context, [], {})
+            assert result['metrics']['cpu_usage'] == 85.0
+
+    def test_per_objective_url_override(self):
+        from reconnaissance.prometheus import main as recon_main
+
+        with patch('reconnaissance.prometheus.PrometheusConnect') as mock_prom_cls, \
+             patch('reconnaissance.prometheus._gather_single_metric', return_value=10.0):
+            mock_prom_cls.return_value = MagicMock()
+
+            context = {
+                'reconnaissance': {
+                    'prometheus': {'url': 'http://default:9090'}
+                },
+                'objectives': [
+                    {
+                        'name': 'latency',
+                        'reconnaissance': {
+                            'service': 'prometheus',
+                            'query': 'latency_ms',
+                            'url': 'http://custom-prom:9090'
+                        }
+                    }
+                ],
+                'guardrails': []
+            }
+
+            recon_main(context, [], {})
+
+            prom_call_url = mock_prom_cls.call_args[1]['url']
+            assert prom_call_url == 'http://custom-prom:9090'
+
+    def test_empty_objectives_and_guardrails(self):
+        from reconnaissance.prometheus import main as recon_main
+
+        context = {
+            'reconnaissance': {'prometheus': {'url': 'http://prom:9090'}},
+            'objectives': [],
+            'guardrails': []
+        }
+
+        result = recon_main(context, [], {})
+        assert result['status'] == 'completed'
+        assert result['metrics'] == {}

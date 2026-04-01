@@ -261,3 +261,165 @@ class TestContractCompliance:
             assert 'successful_changes' in result
             assert 'failed_changes' in result
             assert 'results' in result
+
+
+class TestHTTPAuthTypes:
+    def test_basic_auth(self):
+        with patch.object(http_module, 'wmill') as mock_wmill, \
+             patch.object(http_module, 'requests') as mock_requests:
+            mock_wmill.get_variable.return_value = {'username': 'admin', 'password': 'secret'}
+            mock_response = MagicMock()
+            mock_response.ok = True
+            mock_response.status_code = 200
+            mock_response.content = b''
+            mock_requests.request.return_value = mock_response
+
+            context = {
+                'effectuation': {
+                    'type': 'http',
+                    'endpoint_config': {'path': '/api/config', 'method': 'POST'}
+                }
+            }
+            targets = [{'id': 't1', 'url': 'https://api.example.com',
+                         'auth_type': 'basic', 'auth_variable_path': 'u/auth/creds'}]
+            settings = {'param': 'value'}
+
+            http_module.main(context, targets, settings)
+
+            req_call = mock_requests.request.call_args
+            auth_header = req_call[1]['headers']['Authorization']
+            assert auth_header.startswith('Basic ')
+
+    def test_api_key_auth(self):
+        with patch.object(http_module, 'wmill') as mock_wmill, \
+             patch.object(http_module, 'requests') as mock_requests:
+            mock_wmill.get_variable.return_value = {'header_name': 'X-Custom-Key', 'api_key': 'my-key-123'}
+            mock_response = MagicMock()
+            mock_response.ok = True
+            mock_response.status_code = 200
+            mock_response.content = b''
+            mock_requests.request.return_value = mock_response
+
+            context = {
+                'effectuation': {
+                    'type': 'http',
+                    'endpoint_config': {'path': '/api/config', 'method': 'POST'}
+                }
+            }
+            targets = [{'id': 't1', 'url': 'https://api.example.com',
+                         'auth_type': 'api_key', 'auth_variable_path': 'u/auth/key'}]
+            settings = {'param': 'value'}
+
+            http_module.main(context, targets, settings)
+
+            req_call = mock_requests.request.call_args
+            assert req_call[1]['headers']['X-Custom-Key'] == 'my-key-123'
+
+    def test_no_auth(self):
+        with patch.object(http_module, 'wmill') as mock_wmill, \
+             patch.object(http_module, 'requests') as mock_requests:
+            mock_response = MagicMock()
+            mock_response.ok = True
+            mock_response.status_code = 200
+            mock_response.content = b''
+            mock_requests.request.return_value = mock_response
+
+            context = {
+                'effectuation': {
+                    'type': 'http',
+                    'endpoint_config': {'path': '/api/config', 'method': 'POST'}
+                }
+            }
+            targets = [{'id': 't1', 'url': 'https://api.example.com'}]
+            settings = {'param': 'value'}
+
+            result = http_module.main(context, targets, settings)
+            assert result['successful_changes'] == 1
+            mock_wmill.get_variable.assert_not_called()
+
+
+class TestHTTPErrorHandling:
+    def test_timeout_exception(self):
+        import requests as real_requests
+        with patch.object(http_module, 'wmill'), \
+             patch.object(http_module, 'requests') as mock_requests:
+            mock_requests.exceptions = real_requests.exceptions
+            mock_requests.request.side_effect = real_requests.exceptions.Timeout("timed out")
+
+            context = {
+                'effectuation': {
+                    'type': 'http',
+                    'endpoint_config': {'path': '/api/config', 'method': 'POST'}
+                }
+            }
+            targets = [{'id': 't1', 'url': 'https://api.example.com'}]
+            settings = {}
+
+            result = http_module.main(context, targets, settings)
+            assert result['failed_changes'] == 1
+            assert 'timed out' in result['results'][0]['error'].lower()
+
+    def test_connection_error(self):
+        import requests as real_requests
+        with patch.object(http_module, 'wmill'), \
+             patch.object(http_module, 'requests') as mock_requests:
+            mock_requests.exceptions = real_requests.exceptions
+            mock_requests.request.side_effect = real_requests.exceptions.ConnectionError("refused")
+
+            context = {
+                'effectuation': {
+                    'type': 'http',
+                    'endpoint_config': {'path': '/api/config', 'method': 'POST'}
+                }
+            }
+            targets = [{'id': 't1', 'url': 'https://api.example.com'}]
+            settings = {}
+
+            result = http_module.main(context, targets, settings)
+            assert result['failed_changes'] == 1
+            assert 'Connection failed' in result['results'][0]['error']
+
+    def test_stabilization_wait(self):
+        with patch.object(http_module, 'wmill'), \
+             patch.object(http_module, 'requests') as mock_requests, \
+             patch('effectuation.http.time') as mock_time:
+            mock_response = MagicMock()
+            mock_response.ok = True
+            mock_response.status_code = 200
+            mock_response.content = b''
+            mock_requests.request.return_value = mock_response
+
+            context = {
+                'effectuation': {
+                    'type': 'http',
+                    'endpoint_config': {'path': '/api/config', 'method': 'POST'},
+                    'stabilization_seconds': 15,
+                }
+            }
+            targets = [{'id': 't1', 'url': 'https://api.example.com'}]
+            settings = {}
+
+            http_module.main(context, targets, settings)
+            mock_time.sleep.assert_called_with(15)
+
+    def test_custom_method_put(self):
+        with patch.object(http_module, 'wmill'), \
+             patch.object(http_module, 'requests') as mock_requests:
+            mock_response = MagicMock()
+            mock_response.ok = True
+            mock_response.status_code = 200
+            mock_response.content = b''
+            mock_requests.request.return_value = mock_response
+
+            context = {
+                'effectuation': {
+                    'type': 'http',
+                    'endpoint_config': {'path': '/api/config', 'method': 'PUT'}
+                }
+            }
+            targets = [{'id': 't1', 'url': 'https://api.example.com'}]
+            settings = {'param': 'value'}
+
+            http_module.main(context, targets, settings)
+            req_call = mock_requests.request.call_args
+            assert req_call[1]['method'] == 'PUT'
