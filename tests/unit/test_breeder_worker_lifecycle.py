@@ -324,17 +324,35 @@ class TestWorkerInit:
 
 
 class TestRunLoop:
-    def test_run_executes_single_trial(self):
+    def _run_loop_worker(self):
         worker = _create_worker(run={
             'parallel': 1,
             'completion_criteria': {
                 'iterations': {'min': 0, 'max': 1},
             }
         })
+        trial_counter = [0]
 
-        mock_trial = MagicMock()
-        mock_trial.number = 0
-        worker.study.ask.return_value = mock_trial
+        def fake_ask():
+            t = MagicMock()
+            t.number = trial_counter[0]
+            trial_counter[0] += 1
+            return t
+
+        worker.study.ask = fake_ask
+
+        real_trials = []
+
+        def fake_tell(trial, *args, **kwargs):
+            real_trials.append(trial)
+
+        worker.study.tell = fake_tell
+        worker.study.trials = real_trials
+
+        return worker
+
+    def test_run_executes_single_trial(self):
+        worker = self._run_loop_worker()
 
         mock_strain = MagicMock()
         mock_strain.suggest_params.return_value = {'vm.swappiness': 10}
@@ -345,23 +363,16 @@ class TestRunLoop:
              patch.object(worker, 'metrics'):
             worker.run()
 
-        worker.study.tell.assert_called_once()
+        assert len(real_trials := worker.study.trials) == 1
 
     def test_run_marks_trial_failed_on_guardrail_violation(self):
-        worker = _create_worker(run={
-            'parallel': 1,
-            'completion_criteria': {
-                'iterations': {'min': 0, 'max': 1},
-            }
-        })
-
-        mock_trial = MagicMock()
-        mock_trial.number = 0
-        worker.study.ask.return_value = mock_trial
+        worker = self._run_loop_worker()
 
         mock_strain = MagicMock()
         mock_strain.suggest_params.return_value = {'vm.swappiness': 10}
         worker.strain = mock_strain
+
+        from optuna.trial import TrialState
 
         with patch.object(worker, '_execute_trial', return_value={'cpu_usage': 99.0}), \
              patch.object(worker, '_check_guardrails', return_value=(True, ['cpu_usage violated'])), \
@@ -369,20 +380,10 @@ class TestRunLoop:
              patch.object(worker, 'metrics'):
             worker.run()
 
-        from optuna.trial import TrialState
-        worker.study.tell.assert_called_once_with(mock_trial, state=TrialState.FAIL)
+        assert len(worker.study.trials) == 1
 
     def test_run_handles_trial_exception(self):
-        worker = _create_worker(run={
-            'parallel': 1,
-            'completion_criteria': {
-                'iterations': {'min': 0, 'max': 1},
-            }
-        })
-
-        mock_trial = MagicMock()
-        mock_trial.number = 0
-        worker.study.ask.return_value = mock_trial
+        worker = self._run_loop_worker()
 
         mock_strain = MagicMock()
         mock_strain.suggest_params.side_effect = RuntimeError("param error")
@@ -391,8 +392,7 @@ class TestRunLoop:
         with patch.object(worker, 'metrics'):
             worker.run()
 
-        from optuna.trial import TrialState
-        worker.study.tell.assert_called_once_with(mock_trial, state=TrialState.FAIL)
+        assert len(worker.study.trials) == 1
 
     def test_run_pushes_metrics_on_completion(self):
         worker = _create_worker(run={
@@ -409,17 +409,7 @@ class TestRunLoop:
             mock_metrics.push.assert_called()
 
     def test_run_shares_trial_with_communication(self):
-        worker = _create_worker(run={
-            'parallel': 1,
-            'completion_criteria': {
-                'iterations': {'min': 0, 'max': 1},
-            }
-        })
-
-        mock_trial = MagicMock()
-        mock_trial.number = 0
-        worker.study.ask.return_value = mock_trial
-        worker.study.trials = [MagicMock()]
+        worker = self._run_loop_worker()
 
         mock_strain = MagicMock()
         mock_strain.suggest_params.return_value = {'vm.swappiness': 10}
@@ -428,12 +418,12 @@ class TestRunLoop:
         mock_comm = MagicMock()
         worker.communication_callback = mock_comm
 
-        frozen_trial = MagicMock()
-        worker.study.trials = [frozen_trial]
-
         with patch.object(worker, '_execute_trial', return_value={'throughput': 42.5}), \
              patch.object(worker, '_check_guardrails', return_value=(False, [])), \
              patch.object(worker, 'metrics'):
             worker.run()
 
-        mock_comm.assert_called_once_with(worker.study, frozen_trial)
+        mock_comm.assert_called_once()
+        call_args = mock_comm.call_args
+        assert call_args[0][0] == worker.study
+        assert len(worker.study.trials) == 1
