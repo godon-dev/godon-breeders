@@ -7,7 +7,6 @@ from f.breeder.shared.otel_logging import get_logger
 logger = get_logger(__name__)
 
 CATEGORIES = ["sysctl", "sysfs", "cpufreq", "ethtool"]
-EFFECTUATION_FLOW = "f/breeder/strains/linux_performance/effectuation_flow"
 
 
 def suggest_params(trial, settings: Dict[str, Any]) -> Dict[str, Any]:

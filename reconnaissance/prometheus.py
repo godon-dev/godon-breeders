@@ -120,43 +120,28 @@ def prometheus_query_with_retry(prom_conn, query: str, max_retries: int = 3, ini
     raise Exception(f"Prometheus query failed after {max_retries} retries: {last_exception}")
 
 
-def main(config: Dict[str, Any], targets: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """
-    Gather metrics from Prometheus for linux_performance breeder
-
-    v0.3: Collects metrics for both objectives (what we optimize) and guardrails (safety limits)
-
-    Args:
-        config: Breeder configuration with objectives, guardrails, and reconnaissance settings
-        targets: List of target systems (unused for Prometheus, but kept for interface consistency)
-
-    Returns:
-        Dictionary with metrics for each objective and guardrail
-    """
-    logger.info("Starting network reconnaissance via Prometheus")
+def main(context: Dict[str, Any], targets: List[Dict[str, Any]], settings: Dict[str, Any] = None) -> Dict[str, Any]:
+    logger.info("Starting reconnaissance via Prometheus")
 
     # Get Prometheus URL from config (global default or per-objective override)
     # Priority: 1) per-objective/guardrail config, 2) global reconnaissance config, 3) default
-    global_recon_config = config.get('reconnaissance', {})
+    global_recon_config = context.get('reconnaissance', {})
     global_prometheus_config = global_recon_config.get('prometheus', {})
     prometheus_url = global_prometheus_config.get('url', 'http://localhost:9090')
     logger.info(f"Default Prometheus URL: {prometheus_url}")
 
     metric_data = {}
 
-    # v0.3: Collect metrics for objectives (what we optimize)
-    for objective in config.get('objectives', []):
+    for objective in context.get('objectives', []):
         objective_name = objective.get('name')
         logger.info(f"Gathering objective metric: {objective_name}")
 
         recon_config = objective.get('reconnaissance', {})
 
-        # Get prometheus URL: per-objective override or global default
         objective_prometheus_url = recon_config.get('url', prometheus_url)
         if recon_config.get('url'):
             logger.info(f"Using per-objective Prometheus URL: {objective_prometheus_url}")
 
-        # Create Prometheus connection for this objective
         objective_prom_conn = PrometheusConnect(
             url=objective_prometheus_url,
             retry=urllib3.util.retry.Retry(total=3, raise_on_status=True, backoff_factor=0.5),
@@ -166,8 +151,7 @@ def main(config: Dict[str, Any], targets: List[Dict[str, Any]]) -> Dict[str, Any
         value = _gather_single_metric(objective_prom_conn, objective_name, recon_config)
         metric_data[objective_name] = value
 
-    # v0.3: Collect metrics for guardrails (safety limits)
-    for guardrail in config.get('guardrails', []):
+    for guardrail in context.get('guardrails', []):
         guardrail_name = guardrail.get('name')
         logger.info(f"Gathering guardrail metric: {guardrail_name}")
 

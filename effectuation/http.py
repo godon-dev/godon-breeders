@@ -35,34 +35,17 @@ logger = get_logger(__name__)
 
 
 def main(
+    context: Dict[str, Any],
     targets: List[Dict[str, Any]],
-    endpoint_config: Dict[str, Any],
-    payload: Dict[str, Any],
-    stabilization_seconds: int = 0
+    settings: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """
-    Apply configuration to targets via HTTP API calls
+    effectuation_config = context.get('effectuation', {})
+    endpoint_config = effectuation_config.get('endpoint_config', {})
+    stabilization_seconds = effectuation_config.get('stabilization_seconds', 0)
 
-    Args:
-        targets: List of target configurations with:
-            - id: target identifier
-            - url: base URL for the target (e.g., "https://api.example.com")
-            - auth_type: 'bearer', 'basic', 'api_key', or 'none'
-            - auth_variable_path: Windmill variable path to auth credentials
-        endpoint_config: HTTP endpoint configuration:
-            - path: endpoint path (e.g., "/api/v1/config")
-            - method: HTTP method (GET, POST, PUT, PATCH, DELETE)
-            - headers: additional headers (optional)
-            - timeout_seconds: request timeout (default 30)
-        payload: Configuration data to send in request body
-        stabilization_seconds: Optional wait time after applying changes
-
-    Returns:
-        Dictionary with aggregated results and success status
-    """
-    logger.info(f"Starting HTTP effectuation for {len(targets)} targets")
+    logger.info(f"HTTP effectuation for {len(targets)} targets")
     logger.info(f"Endpoint: {endpoint_config.get('method', 'POST')} {endpoint_config.get('path', '')}")
-    logger.info(f"Payload keys: {list(payload.keys())}")
+    logger.info(f"Settings: {list(settings.keys())}")
 
     all_results = []
 
@@ -99,7 +82,7 @@ def main(
             response = requests.request(
                 method=method,
                 url=full_url,
-                json=payload,
+                json=settings,
                 headers=headers,
                 timeout=timeout
             )

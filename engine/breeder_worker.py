@@ -267,36 +267,41 @@ class BreederWorker:
             logger.info("Communication disabled")
             return None
     
-    def _execute_trial(self, params: Dict[str, Any]) -> Dict[str, float]:
-        flow_path = self.strain.EFFECTUATION_FLOW
+    def _execute_trial(self, settings: Dict[str, Any]) -> Dict[str, float]:
+        import wmill
 
         targets = self.config.get('effectuation', {}).get('targets', [])
+        effectuator_path = f"f/effectuation/{self.config.get('effectuation', {}).get('type', 'ssh')}"
+        recon_path = f"f/reconnaissance/{self.config.get('reconnaissance', {}).get('type', 'prometheus')}"
 
-        flow_inputs = {
-            'config': self.config,
-            'targets': targets,
-            'params': params
-        }
-
-        logger.info(f"Executing effectuation flow for {len(targets)} targets with params: {list(params.keys())}")
+        # Batch mode: single script call handles all targets internally.
+        # Future: per-target fanout via wmill.run_script_async() for parallel
+        # distribution across Windmill workers. Controlled by
+        # effectuation.dispatch config option (batch | per_target).
+        logger.info(f"Effectuating {len(targets)} targets via {effectuator_path} with settings: {list(settings.keys())}")
 
         try:
-            import wmill
-            job_id = wmill.run_flow_async(path=flow_path, args=flow_inputs)
-            logger.debug(f"Effectuation flow job ID: {job_id}")
+            eff_result = wmill.run_script_by_path(
+                effectuator_path,
+                args={"context": self.config, "targets": targets, "settings": settings}
+            )
 
-            result = wmill.get_result(job_id)
-            logger.info(f"Effectuation flow completed: {result.get('status')}")
+            logger.info(f"Effectuation completed: {eff_result.get('status')}")
 
-            metrics = result.get('metrics', {})
+            recon_result = wmill.run_script_by_path(
+                recon_path,
+                args={"context": self.config, "targets": targets, "settings": settings}
+            )
+
+            metrics = recon_result.get('metrics', {})
             if not metrics:
-                logger.error("No metrics returned from effectuation flow")
+                logger.error("No metrics returned from reconnaissance")
                 return {obj.get('name'): float('inf') for obj in self.config.get('objectives', [])}
 
             return metrics
 
         except Exception as e:
-            logger.error(f"Effectuation flow failed: {e}", exc_info=True)
+            logger.error(f"Trial execution failed: {e}", exc_info=True)
             return {obj.get('name'): float('inf') for obj in self.config.get('objectives', [])}
 
     def _check_guardrails(self, metrics: Dict[str, float]) -> tuple[bool, list[str]]:
@@ -434,17 +439,13 @@ class BreederWorker:
 
         try:
             import wmill
-            flow_path = self.strain.EFFECTUATION_FLOW
+            effectuator_path = f"f/effectuation/{self.config.get('effectuation', {}).get('type', 'ssh')}"
 
-            flow_inputs = {
-                'config': self.config,
-                'targets': [self.target],
-                'params': params_to_restore
-            }
-
-            logger.info(f"Executing rollback effectuation flow for target {self.target_id}")
-            job_id = wmill.run_flow_async(path=flow_path, args=flow_inputs)
-            result = wmill.get_result(job_id)
+            logger.info(f"Executing rollback effectuation for target {self.target_id}")
+            result = wmill.run_script_by_path(
+                effectuator_path,
+                args={"context": self.config, "targets": [self.target], "settings": params_to_restore}
+            )
 
             logger.info(f"Rollback effectuation completed: {result.get('status')}")
 
