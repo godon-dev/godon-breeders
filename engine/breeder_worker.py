@@ -210,7 +210,7 @@ class BreederWorker:
         else:
             study_name = f"{self.breeder_id}_study"
         
-        directions = [obj.get('direction') for obj in self.config.get('objectives', [])]
+        directions = [obj.get('direction').lower() for obj in self.config.get('objectives', [])]
         
         try:
             storage = optuna.storages.RDBStorage(url=self._get_db_url())
