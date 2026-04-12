@@ -2,6 +2,7 @@
 #opentelemetry-api
 #opentelemetry-sdk
 #opentelemetry-exporter-otlp
+#psycopg2-binary
 
 import optuna
 import random
