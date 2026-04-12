@@ -37,7 +37,7 @@ class BreederWorker:
         self.config = config
         breeder_config = config.get('breeder', {})
 
-        self.breeder_type = breeder_config.get('name', 'unknown_breeder')
+        self.breeder_type = breeder_config.get('type', 'unknown_breeder')
         self.breeder_uuid = breeder_config.get('uuid', breeder_config.get('name', 'unknown'))
         self.breeder_id = self.breeder_uuid
         self.breeder_db_name = f"breeder_{self.breeder_uuid.replace('-', '_')}"
