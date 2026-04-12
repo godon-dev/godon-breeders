@@ -3,6 +3,7 @@
 #opentelemetry-sdk
 #opentelemetry-exporter-otlp
 #psycopg2-binary
+#wmill
 
 import optuna
 import random
