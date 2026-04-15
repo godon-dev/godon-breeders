@@ -34,12 +34,17 @@ Available effectuators:
 
 ### Reconnaissance (`reconnaissance/`)
 
-Scripts that gather metrics to evaluate trial outcomes. Same `(context, targets, settings)` interface contract. Currently supports Prometheus with multi-sample collection, stabilization waits, and aggregation.
+Scripts that gather metrics to evaluate trial outcomes. Same `(context, targets, settings)` interface contract. Supports:
+- **Prometheus** — multi-sample collection, stabilization waits, and aggregation
+- **HTTP** — metric collection via HTTP GET with configurable stabilization, multi-sampling, and aggregation
 
 ## Available Strains
 
 ### linux_performance (`strains/linux_performance/`)
 Optimizes Linux system parameters (sysctl, sysfs, cpufreq, ethtool) for improved performance. Supports network, memory, CPU, and custom optimization objectives via Prometheus metrics.
+
+### bench_greenhouse (`strains/bench_greenhouse/`)
+Optimizes greenhouse climate simulation parameters. Supports multi-zone heating, ventilation, shading, CO2 injection, lighting, and irrigation. Designed for the `godon-bench-greenhouse` simulation container with HTTP-based effectuation and reconnaissance.
 
 ## License
 
