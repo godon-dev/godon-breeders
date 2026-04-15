@@ -1,0 +1,12 @@
+name: bench_greenhouse_strain
+target: breeder/strains/bench_greenhouse
+workspace: godon
+
+scripts:
+  - pattern: "*.py"
+    settings:
+      summary: "Greenhouse Bench Strain"
+      description: "Domain knowledge for greenhouse simulation optimization - parameter registry, preflight validation, and suggestion logic for multi-zone climate control"
+      tag: "breeder"
+
+flows: []

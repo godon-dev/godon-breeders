@@ -1,0 +1,51 @@
+PARAMETER_REGISTRY = {
+    "heating_setpoints": {
+        "type": "float",
+        "scope": "per_zone",
+        "causes_downtime": False,
+        "description": "Target temperature per zone (Celsius)",
+        "typical_range": [5.0, 40.0],
+    },
+    "vent_openings": {
+        "type": "float",
+        "scope": "per_zone",
+        "causes_downtime": False,
+        "description": "Ventilation opening fraction per zone (0.0-1.0)",
+        "typical_range": [0.0, 1.0],
+    },
+    "shading": {
+        "type": "float",
+        "scope": "global",
+        "causes_downtime": False,
+        "description": "Shading coefficient (0.0-1.0)",
+        "typical_range": [0.0, 1.0],
+    },
+    "co2_injection": {
+        "type": "float",
+        "scope": "global",
+        "causes_downtime": False,
+        "description": "CO2 injection rate",
+        "typical_range": [0.0, 20.0],
+    },
+    "light_intensity": {
+        "type": "float",
+        "scope": "global",
+        "causes_downtime": False,
+        "description": "Supplemental light intensity",
+        "typical_range": [0.0, 1000.0],
+    },
+    "irrigation": {
+        "type": "float",
+        "scope": "global",
+        "causes_downtime": False,
+        "description": "Irrigation rate (0.0-3.0)",
+        "typical_range": [0.0, 3.0],
+    },
+    "sim_steps": {
+        "type": "int",
+        "scope": "global",
+        "causes_downtime": False,
+        "description": "Simulation steps per trial",
+        "typical_range": [10, 200],
+    },
+}
