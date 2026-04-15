@@ -43,17 +43,20 @@ fake_breeder = MagicMock()
 fake_engine = FakeModule('f.breeder.engine')
 fake_strains = MagicMock()
 fake_strains_lnx_perf = FakeModule('f.breeder.strains.linux_performance')
+fake_strains_bench_gh = FakeModule('f.breeder.strains.bench_greenhouse')
 fake_breeder_shared = MagicMock()
 fake_f.breeder = fake_breeder
 fake_breeder.engine = fake_engine
 fake_breeder.strains = fake_strains
 fake_strains.linux_performance = fake_strains_lnx_perf
+fake_strains.bench_greenhouse = fake_strains_bench_gh
 fake_breeder.shared = fake_breeder_shared
 sys.modules['f'] = fake_f
 sys.modules['f.breeder'] = fake_breeder
 sys.modules['f.breeder.engine'] = fake_engine
 sys.modules['f.breeder.strains'] = fake_strains
 sys.modules['f.breeder.strains.linux_performance'] = fake_strains_lnx_perf
+sys.modules['f.breeder.strains.bench_greenhouse'] = fake_strains_bench_gh
 sys.modules['f.breeder.shared'] = fake_breeder_shared
 
 fake_otel = MagicMock()
@@ -69,6 +72,10 @@ for module_name in ['breeder_worker', 'breeder_metrics_client', 'communication',
 for module_name in ['parameter_registry', 'preflight', 'strain']:
     stub = FakeModule()
     sys.modules[f'f.breeder.strains.linux_performance.{module_name}'] = stub
+
+for module_name in ['parameter_registry', 'preflight', 'strain']:
+    stub = FakeModule()
+    sys.modules[f'f.breeder.strains.bench_greenhouse.{module_name}'] = stub
 
 
 def populate_stub_module(stub_module, source_module):
@@ -96,6 +103,15 @@ populate_stub_module(sys.modules['f.breeder.strains.linux_performance.preflight'
 
 import strains.linux_performance.strain as strain
 populate_stub_module(sys.modules['f.breeder.strains.linux_performance.strain'], strain)
+
+import strains.bench_greenhouse.parameter_registry as gh_parameter_registry
+populate_stub_module(sys.modules['f.breeder.strains.bench_greenhouse.parameter_registry'], gh_parameter_registry)
+
+import strains.bench_greenhouse.preflight as gh_preflight
+populate_stub_module(sys.modules['f.breeder.strains.bench_greenhouse.preflight'], gh_preflight)
+
+import strains.bench_greenhouse.strain as gh_strain
+populate_stub_module(sys.modules['f.breeder.strains.bench_greenhouse.strain'], gh_strain)
 
 # Import breeder worker last (depends on all above)
 import engine.breeder_worker as breeder_worker
