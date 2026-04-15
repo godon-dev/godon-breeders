@@ -128,13 +128,13 @@ class TestPreflightValidation:
         assert result['result'] == 'FAILURE'
         assert 'zones' in result['error'].lower()
 
-    def test_categorical_param_wrong_constraints_fails(self):
+    def test_float_param_wrong_constraints_fails(self):
         config = {
             'settings': {
                 'greenhouse': {
                     'zones': 2,
                     'shading': {
-                        'constraints': [{'step': 0.1, 'lower': 0.0, 'upper': 1.0}]
+                        'constraints': [{'values': ['a', 'b']}]
                     }
                 }
             }
@@ -144,7 +144,7 @@ class TestPreflightValidation:
         assert result['result'] == 'FAILURE'
         assert "step/lower/upper" in result['error']
 
-    def test_float_param_wrong_constraints_fails(self):
+    def test_per_zone_param_wrong_constraints_fails(self):
         config = {
             'settings': {
                 'greenhouse': {
@@ -158,7 +158,7 @@ class TestPreflightValidation:
 
         result = preflight.main(config=config)
         assert result['result'] == 'FAILURE'
-        assert "'values'" in result['error']
+        assert "step/lower/upper" in result['error']
 
     def test_non_dict_settings_fails(self):
         config = {
