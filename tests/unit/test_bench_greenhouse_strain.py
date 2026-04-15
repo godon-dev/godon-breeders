@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
 sys.modules['optuna'] = MagicMock()
 
-from strains.bench_greenhouse.strain import suggest_params, _suggest_single_param, validate_config
+from strains.bench_greenhouse.strain import suggest_params, _suggest_single, validate_config
 
 
 class TestSuggestSingleParam:
@@ -15,7 +15,7 @@ class TestSuggestSingleParam:
         trial = MagicMock()
         trial.suggest_categorical.return_value = 'performance'
 
-        result = _suggest_single_param(
+        result = _suggest_single(
             trial, 'qdisc',
             [{'values': ['fq', 'fq_codel', 'codel']}],
         )
@@ -26,7 +26,7 @@ class TestSuggestSingleParam:
         trial = MagicMock()
         trial.suggest_int.return_value = 60
 
-        result = _suggest_single_param(
+        result = _suggest_single(
             trial, 'sim_steps',
             [{'step': 10, 'lower': 10, 'upper': 200}],
         )
@@ -37,7 +37,7 @@ class TestSuggestSingleParam:
         trial = MagicMock()
         trial.suggest_float.return_value = 0.5
 
-        result = _suggest_single_param(
+        result = _suggest_single(
             trial, 'shading',
             [{'step': 0.05, 'lower': 0.0, 'upper': 1.0}],
         )
@@ -47,17 +47,17 @@ class TestSuggestSingleParam:
     def test_empty_constraints_raises(self):
         trial = MagicMock()
         with pytest.raises(ValueError, match="constraints must be a non-empty list"):
-            _suggest_single_param(trial, 'param', [])
+            _suggest_single(trial, 'param', [])
 
     def test_non_list_constraints_raises(self):
         trial = MagicMock()
         with pytest.raises(ValueError, match="constraints must be a non-empty list"):
-            _suggest_single_param(trial, 'param', "not_a_list")
+            _suggest_single(trial, 'param', "not_a_list")
 
     def test_invalid_constraint_format_raises(self):
         trial = MagicMock()
         with pytest.raises(ValueError, match="constraint must have either"):
-            _suggest_single_param(trial, 'param', [{'unknown_key': 1}])
+            _suggest_single(trial, 'param', [{'unknown_key': 1}])
 
 
 class TestSuggestParams:
