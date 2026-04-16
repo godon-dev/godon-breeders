@@ -213,25 +213,31 @@ class BreederWorker:
         
         directions = [obj.get('direction').lower() for obj in self.config.get('objectives', [])]
         
+        storage = optuna.storages.RDBStorage(url=self._get_db_url())
         try:
-            storage = optuna.storages.RDBStorage(url=self._get_db_url())
             study = optuna.load_study(study_name=study_name, storage=storage)
             logger.info(f"Loaded existing study: {study_name} with {len(study.trials)} trials")
         except (KeyError, ValueError):
-            storage = optuna.storages.RDBStorage(url=self._get_db_url())
-            
             sampler = None
             if parallel_workers > 1:
                 sampler = self._create_sampler(self.sampler_type)
                 logger.info(f"Created study {study_name} with {self.sampler_type} sampler")
             
-            study = optuna.create_study(
-                study_name=study_name, 
-                directions=directions, 
-                storage=storage,
-                sampler=sampler
-            )
-            logger.info(f"Created new study: {study_name}")
+            try:
+                study = optuna.create_study(
+                    study_name=study_name, 
+                    directions=directions, 
+                    storage=storage,
+                    sampler=sampler
+                )
+                logger.info(f"Created new study: {study_name}")
+            except (optuna.exceptions.StorageInternalError, Exception) as e:
+                logger.warning(f"Study creation failed ({e}), retrying as load...")
+                import time
+                time.sleep(2)
+                storage = optuna.storages.RDBStorage(url=self._get_db_url())
+                study = optuna.load_study(study_name=study_name, storage=storage)
+                logger.info(f"Loaded study after creation race: {study_name} with {len(study.trials)} trials")
         
         return study
     
