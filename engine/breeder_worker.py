@@ -735,8 +735,11 @@ class BreederWorker:
 
                 except Exception as e:
                     logger.error(f"Trial {trial.number} failed: {e}", exc_info=True)
-                    self.study.tell(trial, state=TrialState.FAIL)
-                    logger.info(f"Trial {trial.number} marked as FAILED")
+                    try:
+                        self.study.tell(trial, state=TrialState.FAIL)
+                        logger.info(f"Trial {trial.number} marked as FAILED")
+                    except ValueError:
+                        logger.info(f"Trial {trial.number} already in terminal state, skipping tell")
 
                     self.metrics.inc_trial('failed')
                     self.metrics.inc_effectuation('failure')
