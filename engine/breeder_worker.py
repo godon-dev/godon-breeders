@@ -6,6 +6,7 @@
 #wmill
 
 import optuna
+import json
 import random
 import hashlib
 import datetime
@@ -688,6 +689,21 @@ class BreederWorker:
                     metrics = self._execute_trial(params)
 
                     guardrails_violated, violations = self._check_guardrails(metrics)
+
+                    guardrails_config = self.config.get('guardrails', [])
+                    if guardrails_config:
+                        guardrail_readings = {}
+                        for g in guardrails_config:
+                            gname = g.get('name', 'unknown')
+                            gval = metrics.get(gname)
+                            if gval is not None:
+                                guardrail_readings[gname] = {
+                                    'value': gval,
+                                    'hard_limit': g.get('hard_limit'),
+                                    'violated': gval > g.get('hard_limit', float('inf')) if isinstance(g.get('hard_limit'), (int, float)) else False
+                                }
+                        if guardrail_readings:
+                            trial.set_user_attr('guardrails', json.dumps(guardrail_readings))
 
                     if guardrails_violated:
                         logger.error(f"Trial {trial.number} failed guardrails: {violations}")
