@@ -297,6 +297,18 @@ class BreederWorker:
 
             logger.info(f"Effectuation completed: {eff_result.get('status')}")
 
+            successful = eff_result.get('successful_changes', 0)
+            failed = eff_result.get('failed_changes', 0)
+
+            if successful == 0 and failed > 0:
+                failed_targets = [r.get('target_id', 'unknown') for r in eff_result.get('results', []) if not r.get('success', False)]
+                logger.error(f"Effectuation completely failed for all targets: {failed_targets}")
+                raise RuntimeError(f"Effectuation failed for all targets: {failed_targets}")
+
+            if failed > 0:
+                failed_targets = [r.get('target_id', 'unknown') for r in eff_result.get('results', []) if not r.get('success', False)]
+                logger.warning(f"Effectuation partially failed: {failed}/{successful + failed} targets succeeded. Failed: {failed_targets}")
+
             recon_result = wmill.run_script_by_path(
                 recon_path,
                 args={"context": self.config, "targets": targets, "settings": settings}
@@ -309,6 +321,9 @@ class BreederWorker:
 
             return metrics
 
+        except RuntimeError as e:
+            logger.error(f"Trial execution failed: {e}", exc_info=True)
+            raise
         except Exception as e:
             logger.error(f"Trial execution failed: {e}", exc_info=True)
             return {obj.get('name'): float('inf') for obj in self.config.get('objectives', [])}
