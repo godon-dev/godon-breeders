@@ -434,6 +434,8 @@ class TestRunLoop:
 class TestRunReconnaissance:
     def setup_method(self):
         sys.modules['wmill'].reset_mock()
+        sys.modules['wmill'].run_script_by_path.reset_mock()
+        sys.modules['wmill'].run_script_by_path.side_effect = None
 
     def test_returns_metrics_from_recon(self):
         worker = _create_worker()
@@ -464,6 +466,8 @@ class TestRunReconnaissance:
 class TestObserveOnly:
     def setup_method(self):
         sys.modules['wmill'].reset_mock()
+        sys.modules['wmill'].run_script_by_path.reset_mock()
+        sys.modules['wmill'].run_script_by_path.side_effect = None
 
     def test_calls_recon_without_effectuation(self):
         worker = _create_worker()
@@ -525,6 +529,8 @@ class TestObserveOnly:
 class TestExecuteTrialUsesRunRecon:
     def setup_method(self):
         sys.modules['wmill'].reset_mock()
+        sys.modules['wmill'].run_script_by_path.reset_mock()
+        sys.modules['wmill'].run_script_by_path.side_effect = None
 
     def test_execute_trial_calls_recon_through_shared_method(self):
         worker = _create_worker()
@@ -607,9 +613,16 @@ class TestRunLoopObserveOnly:
         return worker
 
     def test_observe_only_skips_ask_tell(self):
+        call_count = [0]
+
+        def should_continue_side_effect():
+            call_count[0] += 1
+            return call_count[0] <= 1
+
         worker = self._observe_worker(max_trials=1)
 
-        with patch.object(worker, '_get_current_phase_mode',
+        with patch.object(worker, '_should_continue', side_effect=should_continue_side_effect), \
+             patch.object(worker, '_get_current_phase_mode',
                           return_value=('observe_only', 'choreo-1')), \
              patch.object(worker, '_observe_only',
                           return_value={'throughput': 30.0}) as mock_observe, \
@@ -620,14 +633,22 @@ class TestRunLoopObserveOnly:
         mock_observe.assert_called_once_with('choreo-1')
 
     def test_alternates_between_active_and_observe(self):
-        worker = self._observe_worker(max_trials=4)
         modes = ['active', 'observe_only', 'observe_only', 'active']
         mode_idx = [0]
 
         def next_mode(*args, **kwargs):
-            m = modes[mode_idx[0]]
+            idx = min(mode_idx[0], len(modes) - 1)
+            m = modes[idx]
             mode_idx[0] += 1
             return m, 'choreo-1' if m == 'observe_only' else None
+
+        call_count = [0]
+
+        def should_continue_side_effect():
+            call_count[0] += 1
+            return call_count[0] <= 4
+
+        worker = self._observe_worker(max_trials=4)
 
         mock_strain = MagicMock()
         mock_strain.suggest_params.return_value = {'vm.swappiness': 10}
@@ -645,7 +666,8 @@ class TestRunLoopObserveOnly:
         worker.study.trials = []
         worker.study.best_trials = [MagicMock(number=-1)]
 
-        with patch.object(worker, '_get_current_phase_mode', side_effect=next_mode), \
+        with patch.object(worker, '_should_continue', side_effect=should_continue_side_effect), \
+             patch.object(worker, '_get_current_phase_mode', side_effect=next_mode), \
              patch.object(worker, '_execute_trial', return_value={'throughput': 42.5}), \
              patch.object(worker, '_observe_only', return_value={'throughput': 30.0}), \
              patch.object(worker, '_check_guardrails', return_value=(False, [])), \
