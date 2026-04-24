@@ -235,7 +235,8 @@ class BreederWorker:
             conn.autocommit = True
             cur = conn.cursor()
             cur.execute(
-                "SELECT claim_data FROM interference_choreography_claims "
+                "SELECT id, phases, current_phase, participants "
+                "FROM interference_choreography "
                 "WHERE status = 'running' AND %s = ANY(participants) "
                 "ORDER BY created_at DESC LIMIT 1",
                 (self.breeder_id,)
@@ -245,7 +246,12 @@ class BreederWorker:
             conn.close()
 
             if row:
-                claim = json.loads(row[0]) if isinstance(row[0], str) else row[0]
+                claim = {
+                    'choreography_id': str(row[0]),
+                    'phases': row[1] if isinstance(row[1], list) else json.loads(row[1]),
+                    'current_phase': row[2],
+                    'participants': row[3]
+                }
                 self._choreography_cache = claim
                 self._choreography_cache_ts = time.time()
                 return claim
