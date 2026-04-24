@@ -78,8 +78,12 @@ class BreederWorker:
         self.interference_config = config.get('interference_detection', {})
         self._choreography_cache = None
         self._choreography_cache_ts = 0
+        self._last_choreography_check_ts = 0
 
         self._update_state()
+
+        if self.interference_config.get('mode', 'inactive') == 'active':
+            self._register_interference_breeder()
 
         self.metrics = BreederMetricsClient(
             breeder_id=self.breeder_id,
@@ -279,6 +283,184 @@ class BreederWorker:
         if observe_breeder == self.breeder_id:
             return 'observe_only', claim.get('choreography_id')
         return 'active', claim.get('choreography_id')
+
+    def _register_interference_breeder(self):
+        try:
+            import psycopg2
+            conn = psycopg2.connect(self._get_shared_db_url())
+            conn.autocommit = True
+            cur = conn.cursor()
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS interference_active_breeders (
+                    breeder_id VARCHAR(255) PRIMARY KEY,
+                    last_seen TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+
+            cur.execute(
+                "INSERT INTO interference_active_breeders (breeder_id, last_seen) "
+                "VALUES (%s, NOW()) ON CONFLICT (breeder_id) DO UPDATE SET last_seen = NOW()",
+                (self.breeder_id,)
+            )
+            cur.close()
+            conn.close()
+            logger.info(f"Registered breeder {self.breeder_id} for interference detection")
+        except Exception as e:
+            logger.warning(f"Failed to register for interference detection: {e}")
+
+    _last_heartbeat_ts = 0
+
+    def _heartbeat_interference(self):
+        if self.interference_config.get('mode', 'inactive') != 'active':
+            return
+        if time.time() - self._last_heartbeat_ts < 120:
+            return
+        self._last_heartbeat_ts = time.time()
+        self._register_interference_breeder()
+
+    def _discover_active_breeders(self) -> List[str]:
+        try:
+            import psycopg2
+            conn = psycopg2.connect(self._get_shared_db_url())
+            conn.autocommit = True
+            cur = conn.cursor()
+
+            stale_threshold = "INTERVAL '5 minutes'"
+            cur.execute(
+                f"SELECT breeder_id FROM interference_active_breeders "
+                f"WHERE breeder_id != %s AND last_seen > NOW() - {stale_threshold}",
+                (self.breeder_id,)
+            )
+            rows = cur.fetchall()
+            cur.close()
+            conn.close()
+            return [row[0] for row in rows]
+        except Exception as e:
+            logger.debug(f"Failed to discover active breeders: {e}")
+            return []
+
+    def _maybe_initiate_choreography(self):
+        if self.interference_config.get('mode', 'inactive') != 'active':
+            return
+
+        min_interval = self.interference_config.get('min_interval', 600)
+        if time.time() - self._last_choreography_check_ts < min_interval:
+            return
+
+        self._last_choreography_check_ts = time.time()
+
+        existing = self._get_active_choreography()
+        if existing:
+            self._maybe_advance_choreography(existing)
+            return
+
+        participants = self._discover_active_breeders()
+        if not participants:
+            logger.debug("No other active breeders found for choreography")
+            return
+
+        all_participants = sorted([self.breeder_id] + participants)
+        self._initiate_choreography(all_participants)
+
+    def _initiate_choreography(self, participants: List[str]):
+        import uuid as uuid_mod
+
+        choreography_id = str(uuid_mod.uuid4())
+        phases = []
+        for breeder_id in participants:
+            phases.append({"observe_breeder": None, "label": "baseline"})
+            phases.append({"observe_breeder": breeder_id, "label": "observe"})
+            phases.append({"observe_breeder": None, "label": "recovery"})
+
+        try:
+            import psycopg2
+            conn = psycopg2.connect(self._get_shared_db_url())
+            conn.autocommit = True
+            cur = conn.cursor()
+
+            participants_array = "{" + ",".join(f'"{p}"' for p in participants) + "}"
+            phases_json = json.dumps(phases)
+
+            cur.execute(
+                "INSERT INTO interference_choreography "
+                "(id, participants, phases, current_phase, status) "
+                "VALUES (%s, %s, %s::jsonb, 0, 'running')",
+                (choreography_id, participants_array, phases_json)
+            )
+            cur.close()
+            conn.close()
+
+            self._choreography_cache = None
+            self._choreography_cache_ts = 0
+            logger.info(f"Initiated choreography {choreography_id} with {participants}")
+        except Exception as e:
+            logger.warning(f"Failed to initiate choreography: {e}")
+
+    def _maybe_advance_choreography(self, claim: Dict[str, Any]):
+        current_phase = claim.get('current_phase', 0)
+        phases = claim.get('phases', [])
+        choreography_id = claim.get('choreography_id')
+
+        if current_phase >= len(phases):
+            self._complete_choreography(choreography_id)
+            return
+
+        phase_trials = self.interference_config.get('phase_trials', 5)
+        observe_trials_in_phase = 0
+
+        for trial in reversed(self.study.trials):
+            user_attrs = trial.user_attrs or {}
+            trial_phase_idx = user_attrs.get('choreography_phase_idx')
+            if trial_phase_idx == current_phase:
+                observe_trials_in_phase += 1
+            elif trial_phase_idx is not None and trial_phase_idx < current_phase:
+                break
+
+        if observe_trials_in_phase >= phase_trials:
+            next_phase = current_phase + 1
+            if next_phase >= len(phases):
+                self._complete_choreography(choreography_id)
+            else:
+                self._advance_choreography_phase(choreography_id, next_phase)
+
+    def _advance_choreography_phase(self, choreography_id: str, next_phase: int):
+        try:
+            import psycopg2
+            conn = psycopg2.connect(self._get_shared_db_url())
+            conn.autocommit = True
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE interference_choreography SET current_phase = %s, updated_at = NOW() "
+                "WHERE id = %s AND status = 'running'",
+                (next_phase, choreography_id)
+            )
+            cur.close()
+            conn.close()
+            self._choreography_cache = None
+            self._choreography_cache_ts = 0
+            logger.info(f"Advanced choreography {choreography_id} to phase {next_phase}")
+        except Exception as e:
+            logger.warning(f"Failed to advance choreography phase: {e}")
+
+    def _complete_choreography(self, choreography_id: str):
+        try:
+            import psycopg2
+            conn = psycopg2.connect(self._get_shared_db_url())
+            conn.autocommit = True
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE interference_choreography SET status = 'completed', updated_at = NOW() "
+                "WHERE id = %s",
+                (choreography_id,)
+            )
+            cur.close()
+            conn.close()
+            self._choreography_cache = None
+            self._choreography_cache_ts = 0
+            logger.info(f"Completed choreography {choreography_id}")
+        except Exception as e:
+            logger.warning(f"Failed to complete choreography: {e}")
     
     def _load_or_create_study(self) -> optuna.Study:
         parallel_workers = self.config.get('run', {}).get('parallel', 1)
@@ -373,9 +555,13 @@ class BreederWorker:
         logger.info(f"Observe-only: running reconnaissance without effectuation (choreography: {choreography_id})")
         metrics = self._run_reconnaissance()
 
+        claim = self._get_active_choreography()
+        phase_idx = claim.get('current_phase', 0) if claim else 0
+
         trial = self.study.ask()
         trial.set_user_attr('phase', 'observe_only')
         trial.set_user_attr('choreography_id', choreography_id or '')
+        trial.set_user_attr('choreography_phase_idx', phase_idx)
 
         values = [metrics.get(obj.get('name')) for obj in self.config.get('objectives', [])]
         self.study.tell(trial, values=values)
@@ -788,6 +974,9 @@ class BreederWorker:
                     elif after_action == 'stop':
                         logger.info("Rollback completed with after.action=stop, halting optimization")
                         break
+
+                self._maybe_initiate_choreography()
+                self._heartbeat_interference()
 
                 phase_mode, choreography_id = self._get_current_phase_mode()
 
