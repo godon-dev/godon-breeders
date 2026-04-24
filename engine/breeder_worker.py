@@ -75,6 +75,10 @@ class BreederWorker:
             logger.info(f"Rollback strategy: {self.rollback_config.get('strategy', 'unknown')}")
             self._init_rollback_state()
 
+        self.interference_config = config.get('interference_detection', {})
+        self._choreography_cache = None
+        self._choreography_cache_ts = 0
+
         self._update_state()
 
         self.metrics = BreederMetricsClient(
@@ -204,6 +208,71 @@ class BreederWorker:
             'database': self.breeder_db_name
         }
         return f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+
+    def _get_shared_db_url(self) -> str:
+        import os
+        db_config = {
+            'user': os.environ.get("GODON_ARCHIVE_DB_USER", "postgres"),
+            'password': os.environ.get("GODON_ARCHIVE_DB_PASSWORD", "postgres"),
+            'host': os.environ.get("GODON_ARCHIVE_DB_SERVICE_HOST", "localhost"),
+            'port': os.environ.get("GODON_ARCHIVE_DB_SERVICE_PORT", "5432"),
+            'database': "archive_db"
+        }
+        return f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+
+    def _get_active_choreography(self) -> Optional[Dict[str, Any]]:
+        cache_ttl = self.interference_config.get('cache_ttl', 60)
+        if self._choreography_cache is not None and (time.time() - self._choreography_cache_ts) < cache_ttl:
+            return self._choreography_cache
+
+        if not self.interference_config.get('mode', 'inactive') == 'active':
+            self._choreography_cache = None
+            return None
+
+        try:
+            import psycopg2
+            conn = psycopg2.connect(self._get_shared_db_url())
+            conn.autocommit = True
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT claim_data FROM interference_choreography_claims "
+                "WHERE status = 'running' AND %s = ANY(participants) "
+                "ORDER BY created_at DESC LIMIT 1",
+                (self.breeder_id,)
+            )
+            row = cur.fetchone()
+            cur.close()
+            conn.close()
+
+            if row:
+                claim = json.loads(row[0]) if isinstance(row[0], str) else row[0]
+                self._choreography_cache = claim
+                self._choreography_cache_ts = time.time()
+                return claim
+
+            self._choreography_cache = None
+            self._choreography_cache_ts = time.time()
+            return None
+        except Exception as e:
+            logger.debug(f"Failed to read choreography state: {e}")
+            return self._choreography_cache
+
+    def _get_current_phase_mode(self) -> tuple[str, Optional[str]]:
+        claim = self._get_active_choreography()
+        if not claim:
+            return 'active', None
+
+        current_phase_idx = claim.get('current_phase', 0)
+        phases = claim.get('phases', [])
+        if current_phase_idx >= len(phases):
+            return 'active', None
+
+        phase = phases[current_phase_idx]
+        observe_breeder = phase.get('observe_breeder')
+
+        if observe_breeder == self.breeder_id:
+            return 'observe_only', claim.get('choreography_id')
+        return 'active', claim.get('choreography_id')
     
     def _load_or_create_study(self) -> optuna.Study:
         parallel_workers = self.config.get('run', {}).get('parallel', 1)
@@ -276,17 +345,44 @@ class BreederWorker:
             logger.info("Communication disabled")
             return None
     
+    def _run_reconnaissance(self, settings: Dict[str, Any] = None) -> Dict[str, float]:
+        import wmill
+
+        targets = self.config.get('effectuation', {}).get('targets', [])
+        recon_path = f"f/reconnaissance/{self.config.get('reconnaissance', {}).get('type', 'prometheus')}"
+
+        recon_result = wmill.run_script_by_path(
+            recon_path,
+            args={"context": self.config, "targets": targets, "settings": settings or {}}
+        )
+
+        metrics = recon_result.get('metrics', {})
+        if not metrics:
+            logger.error("No metrics returned from reconnaissance")
+            return {obj.get('name'): float('inf') for obj in self.config.get('objectives', [])}
+
+        return metrics
+
+    def _observe_only(self, choreography_id: Optional[str] = None) -> Dict[str, float]:
+        logger.info(f"Observe-only: running reconnaissance without effectuation (choreography: {choreography_id})")
+        metrics = self._run_reconnaissance()
+
+        trial = self.study.ask()
+        trial.set_user_attr('phase', 'observe_only')
+        trial.set_user_attr('choreography_id', choreography_id or '')
+
+        values = [metrics.get(obj.get('name')) for obj in self.config.get('objectives', [])]
+        self.study.tell(trial, values=values)
+
+        logger.info(f"Observe-only trial {trial.number} recorded with values: {values}")
+        return metrics
+
     def _execute_trial(self, settings: Dict[str, Any]) -> Dict[str, float]:
         import wmill
 
         targets = self.config.get('effectuation', {}).get('targets', [])
         effectuator_path = f"f/effectuation/{self.config.get('effectuation', {}).get('type', 'ssh')}"
-        recon_path = f"f/reconnaissance/{self.config.get('reconnaissance', {}).get('type', 'prometheus')}"
 
-        # Batch mode: single script call handles all targets internally.
-        # Future: per-target fanout via wmill.run_script_async() for parallel
-        # distribution across Windmill workers. Controlled by
-        # effectuation.dispatch config option (batch | per_target).
         logger.info(f"Effectuating {len(targets)} targets via {effectuator_path} with settings: {list(settings.keys())}")
 
         try:
@@ -309,15 +405,7 @@ class BreederWorker:
                 failed_targets = [r.get('target_id', 'unknown') for r in eff_result.get('results', []) if not r.get('success', False)]
                 logger.warning(f"Effectuation partially failed: {failed}/{successful + failed} targets succeeded. Failed: {failed_targets}")
 
-            recon_result = wmill.run_script_by_path(
-                recon_path,
-                args={"context": self.config, "targets": targets, "settings": settings}
-            )
-
-            metrics = recon_result.get('metrics', {})
-            if not metrics:
-                logger.error("No metrics returned from reconnaissance")
-                return {obj.get('name'): float('inf') for obj in self.config.get('objectives', [])}
+            metrics = self._run_reconnaissance(settings)
 
             return metrics
 
@@ -647,6 +735,9 @@ class BreederWorker:
 
         return False
     
+    def _report_phase(self, phase: str, choreography_id: Optional[str], metrics: Dict[str, float]):
+        logger.debug(f"Phase: {phase}, choreography: {choreography_id}")
+
     def _update_state(self):
         import wmill
         state = {
@@ -691,6 +782,22 @@ class BreederWorker:
                     elif after_action == 'stop':
                         logger.info("Rollback completed with after.action=stop, halting optimization")
                         break
+
+                phase_mode, choreography_id = self._get_current_phase_mode()
+
+                if phase_mode == 'observe_only':
+                    logger.info(f"Interference choreography active: observe-only mode (choreography: {choreography_id})")
+                    try:
+                        metrics = self._observe_only(choreography_id)
+                        logger.info(f"Observe-only measurement completed: {metrics}")
+                        trial_count += 1
+                        if trial_count % 5 == 0:
+                            self._update_state()
+                            self.metrics.set_total_trials(len(self.study.trials))
+                            self.metrics.push()
+                    except Exception as e:
+                        logger.error(f"Observe-only measurement failed: {e}", exc_info=True)
+                    continue
 
                 trial = self.study.ask()
                 logger.info(f"Trial {trial.number} started")
