@@ -77,8 +77,10 @@ class BreederWorker:
 
         self.interference_config = config.get('interference_detection', {})
         self._choreography_cache = None
-        self._choreography_cache_ts = 0
+        self._trials_at_last_cache_read = 0
         self._last_choreography_check_ts = 0
+        self._trial_durations = []
+        self._quality_history = []
 
         self._update_state()
 
@@ -224,14 +226,15 @@ class BreederWorker:
         }
         return f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
 
-    def _get_active_choreography(self) -> Optional[Dict[str, Any]]:
-        cache_ttl = self.interference_config.get('cache_ttl', 60)
-        if self._choreography_cache is not None and (time.time() - self._choreography_cache_ts) < cache_ttl:
-            return self._choreography_cache
-
+    def _get_active_choreography(self, force_read=False) -> Optional[Dict[str, Any]]:
         if not self.interference_config.get('mode', 'inactive') == 'active':
-            self._choreography_cache = None
             return None
+
+        if not force_read and self._choreography_cache is not None:
+            phase_duration = self._derive_phase_duration()
+            trials_since_read = len(self.study.trials) - self._trials_at_last_cache_read
+            if trials_since_read < phase_duration:
+                return self._choreography_cache
 
         try:
             import psycopg2
@@ -257,11 +260,11 @@ class BreederWorker:
                     'participants': row[3]
                 }
                 self._choreography_cache = claim
-                self._choreography_cache_ts = time.time()
+                self._trials_at_last_cache_read = len(self.study.trials)
                 return claim
 
             self._choreography_cache = None
-            self._choreography_cache_ts = time.time()
+            self._trials_at_last_cache_read = len(self.study.trials)
             return None
         except Exception as e:
             logger.debug(f"Failed to read choreography state: {e}")
@@ -340,17 +343,73 @@ class BreederWorker:
             logger.debug(f"Failed to discover active breeders: {e}")
             return []
 
+    def _avg_trial_duration(self) -> float:
+        if not self._trial_durations:
+            return 30.0
+        recent = self._trial_durations[-20:]
+        return sum(recent) / len(recent)
+
+    def _derive_min_interval(self) -> float:
+        override = self.interference_config.get('min_interval')
+        if override is not None:
+            return override
+        return max(300.0, 20.0 * self._avg_trial_duration())
+
+    def _derive_max_interval(self) -> float:
+        override = self.interference_config.get('max_interval')
+        if override is not None:
+            return override
+        return max(1800.0, 200.0 * self._avg_trial_duration())
+
+    def _derive_phase_duration(self) -> int:
+        override = self.interference_config.get('phase_trials')
+        if override is not None:
+            return override
+        total = len(self.study.trials)
+        max_trials = max(10, total // 10) if total > 0 else 10
+        return min(max_trials, 20)
+
+    def _phase_quality_stable(self, phase_idx: int) -> bool:
+        phase_values = []
+        for trial in self.study.trials:
+            attrs = trial.user_attrs or {}
+            if attrs.get('choreography_phase_idx') == phase_idx:
+                if trial.values:
+                    phase_values.append(trial.values[0])
+
+        if len(phase_values) < 3:
+            return False
+
+        if len(phase_values) >= self._derive_phase_duration():
+            return True
+
+        recent = phase_values[-min(5, len(phase_values)):]
+        mean = sum(recent) / len(recent)
+        if mean == 0:
+            return True
+        variance = sum((v - mean) ** 2 for v in recent) / len(recent)
+        cv = (variance ** 0.5) / abs(mean)
+        return cv < 0.15
+
+    def _record_trial_metrics(self, duration: float, quality_values: list):
+        self._trial_durations.append(duration)
+        if len(self._trial_durations) > 100:
+            self._trial_durations = self._trial_durations[-50:]
+        self._quality_history.append(quality_values)
+        if len(self._quality_history) > 100:
+            self._quality_history = self._quality_history[-50:]
+
     def _maybe_initiate_choreography(self):
         if self.interference_config.get('mode', 'inactive') != 'active':
             return
 
-        min_interval = self.interference_config.get('min_interval', 600)
+        min_interval = self._derive_min_interval()
         if time.time() - self._last_choreography_check_ts < min_interval:
             return
 
         self._last_choreography_check_ts = time.time()
 
-        existing = self._get_active_choreography()
+        existing = self._get_active_choreography(force_read=True)
         if existing:
             self._maybe_advance_choreography(existing)
             return
@@ -392,7 +451,6 @@ class BreederWorker:
             conn.close()
 
             self._choreography_cache = None
-            self._choreography_cache_ts = 0
             logger.info(f"Initiated choreography {choreography_id} with {participants}")
         except Exception as e:
             logger.warning(f"Failed to initiate choreography: {e}")
@@ -406,18 +464,20 @@ class BreederWorker:
             self._complete_choreography(choreography_id)
             return
 
-        phase_trials = self.interference_config.get('phase_trials', 5)
-        observe_trials_in_phase = 0
+        phase_values = []
+        for trial in self.study.trials:
+            attrs = trial.user_attrs or {}
+            if attrs.get('choreography_phase_idx') == current_phase:
+                if trial.values:
+                    phase_values.append(trial.values[0])
 
-        for trial in reversed(self.study.trials):
-            user_attrs = trial.user_attrs or {}
-            trial_phase_idx = user_attrs.get('choreography_phase_idx')
-            if trial_phase_idx == current_phase:
-                observe_trials_in_phase += 1
-            elif trial_phase_idx is not None and trial_phase_idx < current_phase:
-                break
+        min_trials = 3
+        max_trials = self._derive_phase_duration()
 
-        if observe_trials_in_phase >= phase_trials:
+        if len(phase_values) < min_trials:
+            return
+
+        if len(phase_values) >= max_trials or self._phase_quality_stable(current_phase):
             next_phase = current_phase + 1
             if next_phase >= len(phases):
                 self._complete_choreography(choreography_id)
@@ -438,7 +498,6 @@ class BreederWorker:
             cur.close()
             conn.close()
             self._choreography_cache = None
-            self._choreography_cache_ts = 0
             logger.info(f"Advanced choreography {choreography_id} to phase {next_phase}")
         except Exception as e:
             logger.warning(f"Failed to advance choreography phase: {e}")
@@ -457,7 +516,6 @@ class BreederWorker:
             cur.close()
             conn.close()
             self._choreography_cache = None
-            self._choreography_cache_ts = 0
             logger.info(f"Completed choreography {choreography_id}")
         except Exception as e:
             logger.warning(f"Failed to complete choreography: {e}")
@@ -1040,6 +1098,7 @@ class BreederWorker:
                         self.study.tell(trial, values)
 
                         trial_duration = time.time() - trial_start_time
+                        self._record_trial_metrics(trial_duration, values)
 
                         logger.info(f"Trial {trial.number} completed with values: {values}")
 
