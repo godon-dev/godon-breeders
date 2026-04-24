@@ -668,12 +668,12 @@ class TestRunLoopObserveOnly:
 
         with patch.object(worker, '_should_continue', side_effect=should_continue_side_effect), \
              patch.object(worker, '_get_current_phase_mode', side_effect=next_mode), \
-             patch.object(worker, '_execute_trial', return_value={'throughput': 42.5}), \
-             patch.object(worker, '_observe_only', return_value={'throughput': 30.0}), \
+             patch.object(worker, '_execute_trial', return_value={'throughput': 42.5}) as mock_execute, \
+             patch.object(worker, '_observe_only', return_value={'throughput': 30.0}) as mock_observe, \
              patch.object(worker, '_check_guardrails', return_value=(False, [])), \
              patch.object(worker, '_update_state'), \
              patch.object(worker, 'metrics'):
             worker.run()
 
-        assert worker._observe_only.call_count == 2
-        assert worker._execute_trial.call_count == 2
+        assert mock_observe.call_count == 2
+        assert mock_execute.call_count == 2
