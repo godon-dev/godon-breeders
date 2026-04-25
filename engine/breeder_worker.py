@@ -1095,6 +1095,10 @@ class BreederWorker:
                         self.metrics.inc_effectuation('failure')
                     else:
                         values = [metrics.get(obj.get('name')) for obj in self.config.get('objectives', [])]
+                        if choreography_id:
+                            claim = self._get_active_choreography()
+                            phase_idx = claim.get('current_phase', 0) if claim else 0
+                            trial.set_user_attr('choreography_phase_idx', phase_idx)
                         self.study.tell(trial, values)
 
                         trial_duration = time.time() - trial_start_time

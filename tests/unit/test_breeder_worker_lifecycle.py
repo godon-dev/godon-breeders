@@ -677,3 +677,92 @@ class TestRunLoopObserveOnly:
 
         assert mock_observe.call_count == 2
         assert mock_execute.call_count == 2
+
+
+class TestActiveTrialsTaggedWithPhase:
+    def test_active_trial_tagged_when_choreography_active(self):
+        worker = _create_worker(
+            interference_detection={'mode': 'active'},
+            run={
+                'parallel': 1,
+                'completion_criteria': {
+                    'iterations': {'min': 0, 'max': 1},
+                }
+            }
+        )
+
+        mock_trial = MagicMock()
+        mock_trial.number = 0
+        worker.study.ask.return_value = mock_trial
+        worker.study.trials = []
+        worker.study.best_trials = [MagicMock(number=-1)]
+
+        mock_strain = MagicMock()
+        mock_strain.suggest_params.return_value = {'vm.swappiness': 10}
+        worker.strain = mock_strain
+
+        claim = {
+            'choreography_id': 'choreo-1',
+            'current_phase': 0,
+            'phases': [
+                {'observe_breeder': None},
+                {'observe_breeder': 'other-breeder'},
+                {'observe_breeder': None},
+            ]
+        }
+
+        call_count = [0]
+
+        def should_continue_side_effect():
+            call_count[0] += 1
+            return call_count[0] <= 1
+
+        with patch.object(worker, '_should_continue', side_effect=should_continue_side_effect), \
+             patch.object(worker, '_get_current_phase_mode',
+                          return_value=('active', 'choreo-1')), \
+             patch.object(worker, '_get_active_choreography', return_value=claim), \
+             patch.object(worker, '_execute_trial', return_value={'throughput': 42.5}), \
+             patch.object(worker, '_check_guardrails', return_value=(False, [])), \
+             patch.object(worker, '_update_state'), \
+             patch.object(worker, 'metrics'):
+            worker.run()
+
+        mock_trial.set_user_attr.assert_any_call('choreography_phase_idx', 0)
+
+    def test_active_trial_not_tagged_without_choreography(self):
+        worker = _create_worker(
+            run={
+                'parallel': 1,
+                'completion_criteria': {
+                    'iterations': {'min': 0, 'max': 1},
+                }
+            }
+        )
+
+        mock_trial = MagicMock()
+        mock_trial.number = 0
+        worker.study.ask.return_value = mock_trial
+        worker.study.trials = []
+        worker.study.best_trials = [MagicMock(number=-1)]
+
+        mock_strain = MagicMock()
+        mock_strain.suggest_params.return_value = {'vm.swappiness': 10}
+        worker.strain = mock_strain
+
+        call_count = [0]
+
+        def should_continue_side_effect():
+            call_count[0] += 1
+            return call_count[0] <= 1
+
+        with patch.object(worker, '_should_continue', side_effect=should_continue_side_effect), \
+             patch.object(worker, '_get_current_phase_mode',
+                          return_value=('active', None)), \
+             patch.object(worker, '_execute_trial', return_value={'throughput': 42.5}), \
+             patch.object(worker, '_check_guardrails', return_value=(False, [])), \
+             patch.object(worker, '_update_state'), \
+             patch.object(worker, 'metrics'):
+            worker.run()
+
+        for call in mock_trial.set_user_attr.call_args_list:
+            assert call[0][0] != 'choreography_phase_idx'
