@@ -145,6 +145,8 @@ class BreederWorker:
         self._trials_at_last_cache_read = 0
         self._cache_read_ts = 0
         self._last_choreography_check_ts = 0
+        self._last_heartbeat_ts = 0
+        self._heartbeat_interval = self.interference_config.get('heartbeat_interval', 120)
         self._trial_durations = []
         self._quality_history = []
 
@@ -392,12 +394,10 @@ class BreederWorker:
         except Exception as e:
             logger.warning(f"Failed to register for interference detection: {e}")
 
-    _last_heartbeat_ts = 0
-
     def _heartbeat_interference(self):
         if self.interference_config.get('mode', 'inactive') != 'active':
             return
-        if time.time() - self._last_heartbeat_ts < 120:
+        if time.time() - self._last_heartbeat_ts < self._heartbeat_interval:
             return
         self._last_heartbeat_ts = time.time()
         self._register_interference_breeder()
@@ -407,8 +407,8 @@ class BreederWorker:
             cur = conn.cursor()
             cur.execute(
                 "SELECT breeder_id FROM interference_active_breeders "
-                "WHERE breeder_id != %s AND last_seen > NOW() - INTERVAL '5 minutes'",
-                (self.breeder_id,)
+                "WHERE breeder_id != %s AND last_seen > NOW() - INTERVAL '%s seconds'",
+                (self.breeder_id, self._heartbeat_interval * 3)
             )
             rows = cur.fetchall()
             cur.close()
@@ -498,11 +498,12 @@ class BreederWorker:
 
     def _record_trial_metrics(self, duration: float, quality_values: list):
         self._trial_durations.append(duration)
-        if len(self._trial_durations) > 100:
-            self._trial_durations = self._trial_durations[-50:]
+        cap = max(100, self._derive_phase_duration() * 5)
+        if len(self._trial_durations) > cap:
+            self._trial_durations = self._trial_durations[-(cap // 2):]
         self._quality_history.append(quality_values)
-        if len(self._quality_history) > 100:
-            self._quality_history = self._quality_history[-50:]
+        if len(self._quality_history) > cap:
+            self._quality_history = self._quality_history[-(cap // 2):]
 
     def _maybe_initiate_choreography(self):
         if self.interference_config.get('mode', 'inactive') != 'active':
@@ -513,6 +514,15 @@ class BreederWorker:
             return
 
         self._last_choreography_check_ts = time.time()
+
+        phase_duration = self._derive_phase_duration()
+        med_duration = self._median_trial_duration()
+        observed_cv = self._observed_coefficient_of_variation()
+        logger.info(
+            f"Choreography check: min_interval={min_interval:.0f}s, "
+            f"phase_duration={phase_duration}, median_trial={med_duration:.1f}s, "
+            f"observed_cv={observed_cv:.3f}, total_trials={len(self.study.trials)}"
+        )
 
         existing = self._get_active_choreography(force_read=True)
         if existing:
@@ -591,6 +601,9 @@ class BreederWorker:
                 self._complete_choreography(choreography_id)
             return
 
+        phase_label = phases[current_phase].get('label', 'unknown') if current_phase < len(phases) else 'unknown'
+        observe_breeder = phases[current_phase].get('observe_breeder')
+
         phase_values = []
         for trial in self.study.trials:
             attrs = trial.user_attrs or {}
@@ -598,8 +611,14 @@ class BreederWorker:
                 if trial.values:
                     phase_values.append(trial.values[0])
 
-        min_trials = 3
+        min_trials = max(3, self._derive_phase_duration() // 3)
         max_trials = self._derive_phase_duration()
+
+        logger.info(
+            f"Choreography {choreography_id} phase {current_phase}/{len(phases)-1} "
+            f"(label={phase_label}, observe={observe_breeder}): "
+            f"{len(phase_values)}/{max_trials} trials, need {min_trials} to evaluate"
+        )
 
         if len(phase_values) < min_trials:
             return
