@@ -12,6 +12,7 @@ import hashlib
 import datetime
 import dateutil.parser
 import time
+import statistics
 from typing import Dict, Any, Optional, List
 from optuna.trial import TrialState
 from optuna.samplers import TPESampler, NSGAIISampler, NSGAIIISampler, RandomSampler, QMCSampler
@@ -31,9 +32,73 @@ from f.breeder.shared.otel_logging import get_logger
 
 logger = get_logger(__name__)
 
+_RETRYABLE_DB_ERROR_PATTERNS = (
+    'SerializationFailure',
+    '40001',
+    'Transaction aborted',
+    'Timed out waiting',
+    'InternalError_',
+    'Transaction metadata missing',
+    'Heartbeat',
+    'conflict',
+)
+
 
 class BreederWorker:
-    
+
+    @staticmethod
+    def _is_retryable_error(exc: Exception) -> bool:
+        exc_str = str(exc)
+        for pattern in _RETRYABLE_DB_ERROR_PATTERNS:
+            if pattern in exc_str:
+                return True
+        try:
+            if isinstance(exc, optuna.exceptions.StorageInternalError):
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _with_shared_db(self, fn, description: str, max_retries: int = 4):
+        last_error = None
+        for attempt in range(max_retries):
+            conn = None
+            try:
+                import psycopg2
+                conn = psycopg2.connect(self._get_shared_db_url())
+                conn.autocommit = True
+                return fn(conn)
+            except Exception as e:
+                last_error = e
+                if attempt < max_retries - 1 and self._is_retryable_error(e):
+                    wait_time = 2 ** attempt
+                    logger.warning(f"{description} attempt {attempt + 1}/{max_retries} failed: {e}, retrying in {wait_time}s")
+                    time.sleep(wait_time)
+                else:
+                    raise
+            finally:
+                if conn:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+        raise last_error
+
+    def _retry_op(self, fn, description: str, max_retries: int = 4):
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                return fn()
+            except Exception as e:
+                last_error = e
+                if attempt < max_retries - 1 and self._is_retryable_error(e):
+                    wait_time = 2 ** attempt
+                    logger.warning(f"{description} attempt {attempt + 1}/{max_retries} failed: {e}, retrying in {wait_time}s")
+                    time.sleep(wait_time)
+                else:
+                    raise
+        raise last_error
+
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         breeder_config = config.get('breeder', {})
@@ -78,7 +143,10 @@ class BreederWorker:
         self.interference_config = config.get('interference_detection', {})
         self._choreography_cache = None
         self._trials_at_last_cache_read = 0
+        self._cache_read_ts = 0
         self._last_choreography_check_ts = 0
+        self._last_heartbeat_ts = 0
+        self._heartbeat_interval = self.interference_config.get('heartbeat_interval', 120)
         self._trial_durations = []
         self._quality_history = []
 
@@ -92,27 +160,27 @@ class BreederWorker:
             worker_id=self.worker_id,
             breeder_type=self.breeder_type
         )
-        
+
     def _assign_sampler(self) -> str:
         parallel_workers = self.config.get('run', {}).get('parallel', 1)
-        
+
         if parallel_workers <= 1:
             logger.info("Single worker mode, using default TPE sampler")
             return 'tpe'
-        
+
         all_samplers = ['tpe', 'nsga2', 'random', 'nsga3', 'qmc']
         num_samplers = min(parallel_workers, len(all_samplers))
         available_samplers = all_samplers[:num_samplers]
-        
+
         worker_hash = int(hashlib.md5(self.worker_id.encode()).hexdigest(), 16)
         sampler_index = worker_hash % len(available_samplers)
         assigned_sampler = available_samplers[sampler_index]
-        
+
         logger.info(f"Algorithm diversity auto-enabled ({len(available_samplers)} samplers for {parallel_workers} workers): Worker {self.worker_id} assigned '{assigned_sampler}' sampler")
         return assigned_sampler
-    
+
     def _create_sampler(self, sampler_type: str) -> optuna.samplers.BaseSampler:
-        
+
         sampler_profiles = {
             'tpe': {
                 'multivariate_group': [(True, True), (True, False), (False, False)],
@@ -135,7 +203,7 @@ class BreederWorker:
                 'seed': [None]
             }
         }
-        
+
         if sampler_type == 'tpe':
             profile = sampler_profiles['tpe']
             multivariate, group = random.choice(profile['multivariate_group'])
@@ -148,7 +216,7 @@ class BreederWorker:
             }
             logger.info(f"Created TPE sampler with config: {config}")
             return TPESampler(**config)
-        
+
         elif sampler_type == 'nsga2':
             profile = sampler_profiles['nsga2']
             population_size = random.choice(profile['population_size'])
@@ -180,30 +248,30 @@ class BreederWorker:
             }
             logger.info(f"Created NSGAII sampler with crossover={crossover_name}, config: {config}")
             return NSGAIISampler(**config)
-        
+
         elif sampler_type == 'nsga3':
             profile = sampler_profiles['nsga3']
             population_size = random.choice(profile['population_size'])
             config = {'population_size': population_size}
             logger.info(f"Created NSGAIII sampler with config: {config}")
             return NSGAIIISampler(**config)
-        
+
         elif sampler_type == 'random':
             seed = random.choice(sampler_profiles['random']['seed'])
             config = {'seed': seed} if seed is not None else {}
             logger.info(f"Created Random sampler with config: {config}")
             return RandomSampler(**config)
-        
+
         elif sampler_type == 'qmc':
             seed = random.choice(sampler_profiles['qmc']['seed'])
             config = {'seed': seed} if seed is not None else {}
             logger.info(f"Created QMC sampler with config: {config}")
             return QMCSampler(**config)
-        
+
         else:
             logger.warning(f"Unknown sampler '{sampler_type}', falling back to TPE")
             return TPESampler()
-    
+
     def _get_db_url(self) -> str:
         import os
         db_config = {
@@ -233,16 +301,16 @@ class BreederWorker:
         if not force_read and self._choreography_cache is not None:
             phase_duration = self._derive_phase_duration()
             trials_since_read = len(self.study.trials) - self._trials_at_last_cache_read
-            if trials_since_read < phase_duration:
+            cache_age = time.time() - self._cache_read_ts
+            med_duration = self._median_trial_duration()
+            cache_ttl = max(60.0, phase_duration * med_duration * 0.5)
+            if trials_since_read < phase_duration and cache_age < cache_ttl:
                 return self._choreography_cache
 
-        try:
-            import psycopg2
-            conn = psycopg2.connect(self._get_shared_db_url())
-            conn.autocommit = True
+        def op(conn):
             cur = conn.cursor()
             cur.execute(
-                "SELECT id, phases, current_phase, participants "
+                "SELECT id, phases, current_phase, participants, updated_at "
                 "FROM interference_choreography "
                 "WHERE status = 'running' AND %s = ANY(participants) "
                 "ORDER BY created_at DESC LIMIT 1",
@@ -250,21 +318,27 @@ class BreederWorker:
             )
             row = cur.fetchone()
             cur.close()
-            conn.close()
+            return row
+
+        try:
+            row = self._with_shared_db(op, "get_active_choreography")
 
             if row:
                 claim = {
                     'choreography_id': str(row[0]),
                     'phases': row[1] if isinstance(row[1], list) else json.loads(row[1]),
                     'current_phase': row[2],
-                    'participants': row[3]
+                    'participants': row[3],
+                    'updated_at': row[4]
                 }
                 self._choreography_cache = claim
                 self._trials_at_last_cache_read = len(self.study.trials)
+                self._cache_read_ts = time.time()
                 return claim
 
             self._choreography_cache = None
             self._trials_at_last_cache_read = len(self.study.trials)
+            self._cache_read_ts = time.time()
             return None
         except Exception as e:
             logger.debug(f"Failed to read choreography state: {e}")
@@ -288,86 +362,113 @@ class BreederWorker:
         return 'active', claim.get('choreography_id')
 
     def _register_interference_breeder(self):
-        try:
-            import psycopg2
-            conn = psycopg2.connect(self._get_shared_db_url())
-            conn.autocommit = True
+        def op(conn):
             cur = conn.cursor()
-
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS interference_active_breeders (
                     breeder_id VARCHAR(255) PRIMARY KEY,
                     last_seen TIMESTAMPTZ DEFAULT NOW()
                 )
             """)
-
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS interference_choreography (
+                    id UUID PRIMARY KEY,
+                    participants TEXT[] NOT NULL,
+                    phases JSONB NOT NULL,
+                    current_phase INTEGER DEFAULT 0,
+                    status VARCHAR(50) DEFAULT 'running',
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
             cur.execute(
                 "INSERT INTO interference_active_breeders (breeder_id, last_seen) "
                 "VALUES (%s, NOW()) ON CONFLICT (breeder_id) DO UPDATE SET last_seen = NOW()",
                 (self.breeder_id,)
             )
             cur.close()
-            conn.close()
+
+        try:
+            self._with_shared_db(op, "register_interference_breeder")
             logger.info(f"Registered breeder {self.breeder_id} for interference detection")
         except Exception as e:
             logger.warning(f"Failed to register for interference detection: {e}")
 
-    _last_heartbeat_ts = 0
-
     def _heartbeat_interference(self):
         if self.interference_config.get('mode', 'inactive') != 'active':
             return
-        if time.time() - self._last_heartbeat_ts < 120:
+        if time.time() - self._last_heartbeat_ts < self._heartbeat_interval:
             return
         self._last_heartbeat_ts = time.time()
         self._register_interference_breeder()
 
     def _discover_active_breeders(self) -> List[str]:
-        try:
-            import psycopg2
-            conn = psycopg2.connect(self._get_shared_db_url())
-            conn.autocommit = True
+        def op(conn):
             cur = conn.cursor()
-
-            stale_threshold = "INTERVAL '5 minutes'"
             cur.execute(
-                f"SELECT breeder_id FROM interference_active_breeders "
-                f"WHERE breeder_id != %s AND last_seen > NOW() - {stale_threshold}",
-                (self.breeder_id,)
+                "SELECT breeder_id FROM interference_active_breeders "
+                "WHERE breeder_id != %s AND last_seen > NOW() - INTERVAL '%s seconds'",
+                (self.breeder_id, self._heartbeat_interval * 3)
             )
             rows = cur.fetchall()
             cur.close()
-            conn.close()
             return [row[0] for row in rows]
+
+        try:
+            return self._with_shared_db(op, "discover_active_breeders")
         except Exception as e:
             logger.debug(f"Failed to discover active breeders: {e}")
             return []
 
-    def _avg_trial_duration(self) -> float:
+    def _median_trial_duration(self) -> float:
         if not self._trial_durations:
             return 30.0
-        recent = self._trial_durations[-20:]
-        return sum(recent) / len(recent)
+        return float(statistics.median(self._trial_durations[-20:]))
+
+    def _observed_coefficient_of_variation(self) -> float:
+        flat_values = []
+        for vals in self._quality_history:
+            if vals:
+                flat_values.extend(v for v in vals if v is not None and v != float('inf'))
+        if len(flat_values) < 5:
+            return 0.15
+        med = float(statistics.median(flat_values))
+        if med == 0:
+            return 0.15
+        from scipy.stats import median_abs_deviation
+        mad = float(median_abs_deviation(flat_values))
+        return (mad * 1.4826) / abs(med)
 
     def _derive_min_interval(self) -> float:
         override = self.interference_config.get('min_interval')
         if override is not None:
             return override
-        return max(300.0, 20.0 * self._avg_trial_duration())
+        med = self._median_trial_duration()
+        if self._trial_durations:
+            return max(5.0 * med, 60.0)
+        return 300.0
 
     def _derive_max_interval(self) -> float:
         override = self.interference_config.get('max_interval')
         if override is not None:
             return override
-        return max(1800.0, 200.0 * self._avg_trial_duration())
+        med = self._median_trial_duration()
+        if self._trial_durations:
+            return max(50.0 * med, 300.0)
+        return 1800.0
 
     def _derive_phase_duration(self) -> int:
         override = self.interference_config.get('phase_trials')
         if override is not None:
             return override
         total = len(self.study.trials)
-        max_trials = max(10, total // 10) if total > 0 else 10
-        return min(max_trials, 20)
+        if total == 0:
+            return 10
+        cv = self._observed_coefficient_of_variation()
+        base = max(5, int(total * 0.1))
+        if cv > 0.3:
+            base = int(base * 1.5)
+        return max(3, min(base, total // 3))
 
     def _phase_quality_stable(self, phase_idx: int) -> bool:
         phase_values = []
@@ -377,27 +478,32 @@ class BreederWorker:
                 if trial.values:
                     phase_values.append(trial.values[0])
 
-        if len(phase_values) < 3:
+        min_for_stability = max(3, self._derive_phase_duration() // 3)
+        if len(phase_values) < min_for_stability:
             return False
 
         if len(phase_values) >= self._derive_phase_duration():
             return True
 
-        recent = phase_values[-min(5, len(phase_values)):]
-        mean = sum(recent) / len(recent)
-        if mean == 0:
+        window = max(3, len(phase_values) // 2)
+        recent = phase_values[-window:]
+        med = float(statistics.median(recent))
+        if med == 0:
             return True
-        variance = sum((v - mean) ** 2 for v in recent) / len(recent)
-        cv = (variance ** 0.5) / abs(mean)
-        return cv < 0.15
+        from scipy.stats import median_abs_deviation
+        mad = float(median_abs_deviation(recent))
+        cv = (mad * 1.4826) / abs(med)
+        threshold = max(self._observed_coefficient_of_variation() * 0.5, 0.05)
+        return cv < threshold
 
     def _record_trial_metrics(self, duration: float, quality_values: list):
         self._trial_durations.append(duration)
-        if len(self._trial_durations) > 100:
-            self._trial_durations = self._trial_durations[-50:]
+        cap = max(100, self._derive_phase_duration() * 5)
+        if len(self._trial_durations) > cap:
+            self._trial_durations = self._trial_durations[-(cap // 2):]
         self._quality_history.append(quality_values)
-        if len(self._quality_history) > 100:
-            self._quality_history = self._quality_history[-50:]
+        if len(self._quality_history) > cap:
+            self._quality_history = self._quality_history[-(cap // 2):]
 
     def _maybe_initiate_choreography(self):
         if self.interference_config.get('mode', 'inactive') != 'active':
@@ -409,10 +515,22 @@ class BreederWorker:
 
         self._last_choreography_check_ts = time.time()
 
+        phase_duration = self._derive_phase_duration()
+        med_duration = self._median_trial_duration()
+        observed_cv = self._observed_coefficient_of_variation()
+        logger.info(
+            f"Choreography check: min_interval={min_interval:.0f}s, "
+            f"phase_duration={phase_duration}, median_trial={med_duration:.1f}s, "
+            f"observed_cv={observed_cv:.3f}, total_trials={len(self.study.trials)}"
+        )
+
         existing = self._get_active_choreography(force_read=True)
         if existing:
-            self._maybe_advance_choreography(existing)
-            return
+            if self._cleanup_stale_choreography(existing):
+                pass
+            else:
+                self._maybe_advance_choreography(existing)
+                return
 
         participants = self._discover_active_breeders()
         if not participants:
@@ -421,6 +539,28 @@ class BreederWorker:
 
         all_participants = sorted([self.breeder_id] + participants)
         self._initiate_choreography(all_participants)
+
+    def _cleanup_stale_choreography(self, claim: Optional[Dict[str, Any]]) -> bool:
+        if not claim:
+            return False
+        updated_at = claim.get('updated_at')
+        if not updated_at:
+            return False
+
+        if isinstance(updated_at, str):
+            updated_at = dateutil.parser.parse(updated_at)
+        if hasattr(updated_at, 'tzinfo') and updated_at.tzinfo is None:
+            updated_at = updated_at.replace(tzinfo=datetime.timezone.utc)
+
+        stale_hours = self.interference_config.get('stale_timeout_hours', 2)
+        age_hours = (datetime.datetime.now(datetime.timezone.utc) - updated_at).total_seconds() / 3600
+
+        if age_hours > stale_hours:
+            choreography_id = claim.get('choreography_id')
+            logger.warning(f"Choreography {choreography_id} is stale ({age_hours:.1f}h old, threshold {stale_hours}h), marking as expired")
+            self._complete_choreography(choreography_id, status='expired')
+            return True
+        return False
 
     def _initiate_choreography(self, participants: List[str]):
         import uuid as uuid_mod
@@ -432,15 +572,10 @@ class BreederWorker:
             phases.append({"observe_breeder": breeder_id, "label": "observe"})
             phases.append({"observe_breeder": None, "label": "recovery"})
 
-        try:
-            import psycopg2
-            conn = psycopg2.connect(self._get_shared_db_url())
-            conn.autocommit = True
+        def op(conn):
             cur = conn.cursor()
-
             participants_array = "{" + ",".join(f'"{p}"' for p in participants) + "}"
             phases_json = json.dumps(phases)
-
             cur.execute(
                 "INSERT INTO interference_choreography "
                 "(id, participants, phases, current_phase, status) "
@@ -448,8 +583,9 @@ class BreederWorker:
                 (choreography_id, participants_array, phases_json)
             )
             cur.close()
-            conn.close()
 
+        try:
+            self._with_shared_db(op, "initiate_choreography")
             self._choreography_cache = None
             logger.info(f"Initiated choreography {choreography_id} with {participants}")
         except Exception as e:
@@ -460,9 +596,13 @@ class BreederWorker:
         phases = claim.get('phases', [])
         choreography_id = claim.get('choreography_id')
 
-        if current_phase >= len(phases):
-            self._complete_choreography(choreography_id)
+        if not choreography_id or current_phase >= len(phases):
+            if choreography_id:
+                self._complete_choreography(choreography_id)
             return
+
+        phase_label = phases[current_phase].get('label', 'unknown') if current_phase < len(phases) else 'unknown'
+        observe_breeder = phases[current_phase].get('observe_breeder')
 
         phase_values = []
         for trial in self.study.trials:
@@ -471,8 +611,14 @@ class BreederWorker:
                 if trial.values:
                     phase_values.append(trial.values[0])
 
-        min_trials = 3
+        min_trials = max(3, self._derive_phase_duration() // 3)
         max_trials = self._derive_phase_duration()
+
+        logger.info(
+            f"Choreography {choreography_id} phase {current_phase}/{len(phases)-1} "
+            f"(label={phase_label}, observe={observe_breeder}): "
+            f"{len(phase_values)}/{max_trials} trials, need {min_trials} to evaluate"
+        )
 
         if len(phase_values) < min_trials:
             return
@@ -482,53 +628,56 @@ class BreederWorker:
             if next_phase >= len(phases):
                 self._complete_choreography(choreography_id)
             else:
-                self._advance_choreography_phase(choreography_id, next_phase)
+                self._advance_choreography_phase(choreography_id, current_phase, next_phase)
 
-    def _advance_choreography_phase(self, choreography_id: str, next_phase: int):
-        try:
-            import psycopg2
-            conn = psycopg2.connect(self._get_shared_db_url())
-            conn.autocommit = True
+    def _advance_choreography_phase(self, choreography_id: str, current_phase: int, next_phase: int):
+        def op(conn):
             cur = conn.cursor()
             cur.execute(
                 "UPDATE interference_choreography SET current_phase = %s, updated_at = NOW() "
-                "WHERE id = %s AND status = 'running'",
-                (next_phase, choreography_id)
+                "WHERE id = %s AND status = 'running' AND current_phase = %s",
+                (next_phase, choreography_id, current_phase)
             )
+            updated = cur.rowcount
             cur.close()
-            conn.close()
-            self._choreography_cache = None
-            logger.info(f"Advanced choreography {choreography_id} to phase {next_phase}")
+            return updated > 0
+
+        try:
+            advanced = self._with_shared_db(op, "advance_choreography_phase")
+            if advanced:
+                self._choreography_cache = None
+                logger.info(f"Advanced choreography {choreography_id} to phase {next_phase}")
+            else:
+                logger.info(f"Choreography {choreography_id} already advanced past phase {current_phase}")
         except Exception as e:
             logger.warning(f"Failed to advance choreography phase: {e}")
 
-    def _complete_choreography(self, choreography_id: str):
-        try:
-            import psycopg2
-            conn = psycopg2.connect(self._get_shared_db_url())
-            conn.autocommit = True
+    def _complete_choreography(self, choreography_id: str, status: str = 'completed'):
+        def op(conn):
             cur = conn.cursor()
             cur.execute(
-                "UPDATE interference_choreography SET status = 'completed', updated_at = NOW() "
+                "UPDATE interference_choreography SET status = %s, updated_at = NOW() "
                 "WHERE id = %s",
-                (choreography_id,)
+                (status, choreography_id)
             )
             cur.close()
-            conn.close()
+
+        try:
+            self._with_shared_db(op, "complete_choreography")
             self._choreography_cache = None
-            logger.info(f"Completed choreography {choreography_id}")
+            logger.info(f"Completed choreography {choreography_id} with status {status}")
         except Exception as e:
             logger.warning(f"Failed to complete choreography: {e}")
-    
+
     def _load_or_create_study(self) -> optuna.Study:
         parallel_workers = self.config.get('run', {}).get('parallel', 1)
         if parallel_workers > 1:
             study_name = f"{self.breeder_id}_{self.sampler_type}_study"
         else:
             study_name = f"{self.breeder_id}_study"
-        
+
         directions = [obj.get('direction').lower() for obj in self.config.get('objectives', [])]
-        
+
         storage = optuna.storages.RDBStorage(url=self._get_db_url())
         try:
             study = optuna.load_study(study_name=study_name, storage=storage)
@@ -538,29 +687,28 @@ class BreederWorker:
             if parallel_workers > 1:
                 sampler = self._create_sampler(self.sampler_type)
                 logger.info(f"Created study {study_name} with {self.sampler_type} sampler")
-            
+
             try:
                 study = optuna.create_study(
-                    study_name=study_name, 
-                    directions=directions, 
+                    study_name=study_name,
+                    directions=directions,
                     storage=storage,
                     sampler=sampler
                 )
                 logger.info(f"Created new study: {study_name}")
             except (optuna.exceptions.StorageInternalError, Exception) as e:
                 logger.warning(f"Study creation failed ({e}), retrying as load...")
-                import time
                 time.sleep(2)
                 storage = optuna.storages.RDBStorage(url=self._get_db_url())
                 study = optuna.load_study(study_name=study_name, storage=storage)
                 logger.info(f"Loaded study after creation race: {study_name} with {len(study.trials)} trials")
-        
+
         return study
-    
+
     def _setup_communication(self) -> Optional[CommunicationCallback]:
         cooperation_config = self.config.get('cooperation', {})
         parallel_workers = self.config.get('run', {}).get('parallel', 1)
-        
+
         if cooperation_config.get('active', False):
             share_strategy = cooperation_config.get('share_strategy', 'probabilistic')
             probability = cooperation_config.get('probability', 0.8)
@@ -568,16 +716,16 @@ class BreederWorker:
             bottom_percentile = cooperation_config.get('bottom_percentile', 0.2)
             min_trials_for_filtering = cooperation_config.get('min_trials_for_filtering', 10)
             storage = self._get_db_url()
-            
+
             share_within_breeder = parallel_workers > 1
-            
+
             logger.info(f"Communication enabled with strategy: {share_strategy}, share_within_breeder: {share_within_breeder}")
             if share_strategy == "probabilistic":
                 logger.info(f"  Probability: {probability}")
             else:
                 logger.info(f"  Top percentile: {top_percentile}, Bottom percentile: {bottom_percentile}")
                 logger.info(f"  Min trials for filtering: {min_trials_for_filtering}")
-            
+
             return CommunicationCallback(
                 storage=storage,
                 share_strategy=share_strategy,
@@ -590,7 +738,7 @@ class BreederWorker:
         else:
             logger.info("Communication disabled")
             return None
-    
+
     def _run_reconnaissance(self, settings: Dict[str, Any] = None) -> Dict[str, float]:
         import wmill
 
@@ -616,13 +764,13 @@ class BreederWorker:
         claim = self._get_active_choreography()
         phase_idx = claim.get('current_phase', 0) if claim else 0
 
-        trial = self.study.ask()
+        trial = self._retry_op(lambda: self.study.ask(), "observe_only study.ask")
         trial.set_user_attr('phase', 'observe_only')
         trial.set_user_attr('choreography_id', choreography_id or '')
         trial.set_user_attr('choreography_phase_idx', phase_idx)
 
         values = [metrics.get(obj.get('name')) for obj in self.config.get('objectives', [])]
-        self.study.tell(trial, values=values)
+        self._retry_op(lambda: self.study.tell(trial, values=values), "observe_only study.tell")
 
         logger.info(f"Observe-only trial {trial.number} recorded with values: {values}")
         return metrics
@@ -711,7 +859,6 @@ class BreederWorker:
             logger.debug(f"Rollback state already initialized for target {self.target_id}")
             return
 
-        import json
         initial_state = {
             'state': 'normal',
             'consecutive_failures': 0,
@@ -720,12 +867,13 @@ class BreederWorker:
             'version': 0
         }
 
-        self.study.set_user_attr(state_key, json.dumps(initial_state))
+        self._retry_op(
+            lambda: self.study.set_user_attr(state_key, json.dumps(initial_state)),
+            "init_rollback_state"
+        )
         logger.info(f"Initialized rollback state for target {self.target_id}: {initial_state}")
 
     def _get_rollback_state(self) -> Dict[str, Any]:
-        import json
-
         state_key = self._get_rollback_state_key()
         state_json = self.study.user_attrs.get(state_key)
 
@@ -737,13 +885,14 @@ class BreederWorker:
         return json.loads(state_json)
 
     def _update_rollback_state(self, new_state: Dict[str, Any]) -> bool:
-        import json
-
         state_key = self._get_rollback_state_key()
 
         new_state['version'] = new_state.get('version', 0) + 1
 
-        self.study.set_user_attr(state_key, json.dumps(new_state))
+        self._retry_op(
+            lambda: self.study.set_user_attr(state_key, json.dumps(new_state)),
+            "update_rollback_state"
+        )
         logger.debug(f"Updated rollback state for target {self.target_id}: version={new_state['version']}, state={new_state['state']}")
 
         return True
@@ -768,8 +917,6 @@ class BreederWorker:
         return False
 
     def _execute_rollback(self) -> bool:
-        import json
-
         logger.info(f"Executing rollback for target {self.target_id}")
 
         rollback_state = self._get_rollback_state()
@@ -878,7 +1025,7 @@ class BreederWorker:
 
         self._update_rollback_state(rollback_state)
         logger.debug(f"Reset consecutive failures after successful trial")
-    
+
     def _should_continue(self) -> bool:
         completion_criteria = self.config.get('run', {}).get('completion_criteria', {})
 
@@ -926,33 +1073,33 @@ class BreederWorker:
         except Exception as e:
             logger.warning(f"Failed to check shutdown flag: {e}")
             return False
-    
+
     def _check_time_budget(self, completion_criteria: dict) -> bool:
         import re
         timing_config = completion_criteria.get('timing', {})
         end_time_str = timing_config.get('end')
-        
+
         if not end_time_str:
             return False
-        
+
         if not hasattr(self, 'start_time'):
             return False
-        
+
         match = re.match(r'(\d+)([dhm])', end_time_str)
         if not match:
             logger.warning(f"Invalid time format: {end_time_str}")
             return False
-        
+
         value, unit = match.groups()
         value = int(value)
-        
+
         unit_seconds = {'d': 86400, 'h': 3600, 'm': 60}
         budget_seconds = value * unit_seconds[unit]
-        
+
         elapsed_seconds = (datetime.datetime.now() - self.start_time).total_seconds()
-        
+
         return elapsed_seconds >= budget_seconds
-    
+
     def _check_quality_thresholds(self) -> bool:
         if not self.study.best_trials:
             return False
@@ -984,7 +1131,7 @@ class BreederWorker:
                 return True
 
         return False
-    
+
     def _report_phase(self, phase: str, choreography_id: Optional[str], metrics: Dict[str, float]):
         logger.debug(f"Phase: {phase}, choreography: {choreography_id}")
 
@@ -999,7 +1146,7 @@ class BreederWorker:
 
         wmill.set_state(state)
         logger.debug(f"Updated Windmill state: {state}")
-    
+
     def run(self):
         logger.info(f"Starting BreederWorker: {self.worker_id}")
         logger.info(f"Breeder type: {self.breeder_type}, UUID: {self.breeder_uuid}")
@@ -1052,7 +1199,10 @@ class BreederWorker:
                         logger.error(f"Observe-only measurement failed: {e}", exc_info=True)
                     continue
 
-                trial = self.study.ask()
+                trial = self._retry_op(
+                    lambda: self.study.ask(),
+                    f"study.ask"
+                )
                 logger.info(f"Trial {trial.number} started")
 
                 trial_start_time = time.time()
@@ -1082,7 +1232,10 @@ class BreederWorker:
 
                     if guardrails_violated:
                         logger.error(f"Trial {trial.number} failed guardrails: {violations}")
-                        self.study.tell(trial, state=TrialState.FAIL)
+                        self._retry_op(
+                            lambda: self.study.tell(trial, state=TrialState.FAIL),
+                            f"study.tell FAIL (trial {trial.number})"
+                        )
                         logger.info(f"Trial {trial.number} marked as FAILED (guardrail violation)")
 
                         for violation_msg in violations:
@@ -1099,7 +1252,10 @@ class BreederWorker:
                             claim = self._get_active_choreography()
                             phase_idx = claim.get('current_phase', 0) if claim else 0
                             trial.set_user_attr('choreography_phase_idx', phase_idx)
-                        self.study.tell(trial, values)
+                        self._retry_op(
+                            lambda: self.study.tell(trial, values),
+                            f"study.tell (trial {trial.number})"
+                        )
 
                         trial_duration = time.time() - trial_start_time
                         self._record_trial_metrics(trial_duration, values)
@@ -1132,10 +1288,13 @@ class BreederWorker:
                 except Exception as e:
                     logger.error(f"Trial {trial.number} failed: {e}", exc_info=True)
                     try:
-                        self.study.tell(trial, state=TrialState.FAIL)
+                        self._retry_op(
+                            lambda: self.study.tell(trial, state=TrialState.FAIL),
+                            f"study.tell FAIL recovery (trial {trial.number})"
+                        )
                         logger.info(f"Trial {trial.number} marked as FAILED")
-                    except ValueError:
-                        logger.info(f"Trial {trial.number} already in terminal state, skipping tell")
+                    except (ValueError, Exception) as tell_err:
+                        logger.info(f"Trial {trial.number} tell failed: {tell_err}")
 
                     self.metrics.inc_trial('failed')
                     self.metrics.inc_effectuation('failure')
@@ -1164,10 +1323,10 @@ class BreederWorker:
 def main(config: Dict[str, Any], breeder_id: str = None, run_id: int = None, target_id: int = None) -> Dict[str, Any]:
     if breeder_id:
         logger.info(f"Starting worker for breeder: {breeder_id}, run: {run_id}, target: {target_id}")
-    
+
     worker = BreederWorker(config)
     worker.run()
-    
+
     return {
         'worker_id': worker.worker_id,
         'breeder_type': worker.breeder_type,
