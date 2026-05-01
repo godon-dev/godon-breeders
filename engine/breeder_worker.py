@@ -13,6 +13,7 @@ import datetime
 import dateutil.parser
 import time
 import statistics
+import math
 from typing import Dict, Any, Optional, List
 from optuna.trial import TrialState
 from optuna.samplers import TPESampler, NSGAIISampler, NSGAIIISampler, RandomSampler, QMCSampler
@@ -42,6 +43,38 @@ _RETRYABLE_DB_ERROR_PATTERNS = (
     'Heartbeat',
     'conflict',
 )
+
+
+class SPRT:
+    def __init__(self, mu0: float, delta: float, alpha: float = 0.05, beta: float = 0.10):
+        self.mu0 = mu0
+        self.delta = delta
+        self.alpha = alpha
+        self.beta = beta
+        self.sigma = max(delta, 1e-9)
+        self.upper = math.log((1 - beta) / alpha)
+        self.lower = -math.log((1 - alpha) / beta)
+        self.log_likelihood = 0.0
+        self.n = 0
+
+    def update(self, observation: float) -> str:
+        self.n += 1
+        z = (observation - self.mu0 - self.delta / 2) / self.sigma
+        self.log_likelihood += self.delta / (self.sigma ** 2) * (observation - self.mu0 - self.delta / 2)
+
+        if self.log_likelihood >= self.upper:
+            return 'coupling'
+        elif self.log_likelihood <= self.lower:
+            return 'no_coupling'
+        return 'continue'
+
+    @property
+    def verdict(self) -> Optional[str]:
+        if self.log_likelihood >= self.upper:
+            return 'coupling'
+        elif self.log_likelihood <= self.lower:
+            return 'no_coupling'
+        return None
 
 
 class BreederWorker:
@@ -149,6 +182,7 @@ class BreederWorker:
         self._heartbeat_interval = self.interference_config.get('heartbeat_interval', 120)
         self._trial_durations = []
         self._quality_history = []
+        self._sprt_state = {}
 
         self._update_state()
 
@@ -470,32 +504,6 @@ class BreederWorker:
             base = int(base * 1.5)
         return max(3, min(base, total // 3))
 
-    def _phase_quality_stable(self, phase_idx: int) -> bool:
-        phase_values = []
-        for trial in self.study.trials:
-            attrs = trial.user_attrs or {}
-            if attrs.get('choreography_phase_idx') == phase_idx:
-                if trial.values:
-                    phase_values.append(trial.values[0])
-
-        min_for_stability = max(3, self._derive_phase_duration() // 3)
-        if len(phase_values) < min_for_stability:
-            return False
-
-        if len(phase_values) >= self._derive_phase_duration():
-            return True
-
-        window = max(3, len(phase_values) // 2)
-        recent = phase_values[-window:]
-        med = float(statistics.median(recent))
-        if med == 0:
-            return True
-        from scipy.stats import median_abs_deviation
-        mad = float(median_abs_deviation(recent))
-        cv = (mad * 1.4826) / abs(med)
-        threshold = max(self._observed_coefficient_of_variation() * 0.5, 0.05)
-        return cv < threshold
-
     def _record_trial_metrics(self, duration: float, quality_values: list):
         self._trial_durations.append(duration)
         cap = max(100, self._derive_phase_duration() * 5)
@@ -611,19 +619,66 @@ class BreederWorker:
                 if trial.values:
                     phase_values.append(trial.values[0])
 
-        min_trials = max(3, self._derive_phase_duration() // 3)
-        max_trials = self._derive_phase_duration()
+        min_trials = 3
+        max_trials = max(self._derive_phase_duration() * 3, 30)
 
         logger.info(
             f"Choreography {choreography_id} phase {current_phase}/{len(phases)-1} "
             f"(label={phase_label}, observe={observe_breeder}): "
-            f"{len(phase_values)}/{max_trials} trials, need {min_trials} to evaluate"
+            f"{len(phase_values)} trials (SPRT min={min_trials}, cap={max_trials})"
         )
 
         if len(phase_values) < min_trials:
             return
 
-        if len(phase_values) >= max_trials or self._phase_quality_stable(current_phase):
+        if phase_label in ('baseline', 'recovery'):
+            if len(phase_values) >= min_trials:
+                next_phase = current_phase + 1
+                if next_phase >= len(phases):
+                    self._complete_choreography(choreography_id)
+                else:
+                    self._advance_choreography_phase(choreography_id, current_phase, next_phase)
+            return
+
+        sprt_key = (choreography_id, current_phase)
+        if sprt_key not in self._sprt_state:
+            baseline_values = []
+            for trial in self.study.trials:
+                attrs = trial.user_attrs or {}
+                if attrs.get('choreography_phase_idx') is not None:
+                    if attrs.get('choreography_phase_idx') < current_phase:
+                        phase_def = phases[attrs.get('choreography_phase_idx')] if attrs.get('choreography_phase_idx') < len(phases) else {}
+                        if not phase_def.get('observe_breeder'):
+                            if trial.values:
+                                baseline_values.append(trial.values[0])
+
+            if baseline_values:
+                mu0 = float(statistics.median(baseline_values))
+                from scipy.stats import median_abs_deviation
+                delta = float(median_abs_deviation(baseline_values))
+                if delta <= 0:
+                    delta = max(abs(mu0) * 0.1, 1e-6)
+            else:
+                mu0 = float(statistics.median(phase_values)) if phase_values else 0.5
+                delta = abs(mu0) * 0.2 if mu0 != 0 else 0.1
+
+            alpha = self.interference_config.get('sprt_alpha', 0.05)
+            beta = self.interference_config.get('sprt_beta', 0.10)
+            self._sprt_state[sprt_key] = SPRT(mu0, delta, alpha, beta)
+            logger.info(f"SPRT initialized for phase {current_phase}: mu0={mu0:.4f}, delta={delta:.4f}, alpha={alpha}, beta={beta}")
+
+        sprt = self._sprt_state[sprt_key]
+        for val in phase_values[sprt.n:]:
+            result = sprt.update(val)
+
+        logger.info(
+            f"SPRT phase {current_phase}: n={sprt.n}, LLR={sprt.log_likelihood:.3f}, "
+            f"boundaries=[{sprt.lower:.3f}, {sprt.upper:.3f}], verdict={sprt.verdict}"
+        )
+
+        if sprt.verdict is not None or len(phase_values) >= max_trials:
+            if len(phase_values) >= max_trials and sprt.verdict is None:
+                logger.info(f"SPRT phase {current_phase} hit safety cap at {max_trials} trials without verdict, advancing anyway")
             next_phase = current_phase + 1
             if next_phase >= len(phases):
                 self._complete_choreography(choreography_id)
@@ -665,6 +720,9 @@ class BreederWorker:
         try:
             self._with_shared_db(op, "complete_choreography")
             self._choreography_cache = None
+            stale_keys = [k for k in self._sprt_state if k[0] == choreography_id]
+            for k in stale_keys:
+                del self._sprt_state[k]
             logger.info(f"Completed choreography {choreography_id} with status {status}")
         except Exception as e:
             logger.warning(f"Failed to complete choreography: {e}")
