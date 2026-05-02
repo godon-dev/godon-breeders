@@ -27,6 +27,7 @@ from scipy.stats import percentileofscore
 from f.breeder.engine.breeder_metrics_client import BreederMetricsClient
 from f.breeder.engine.communication import CommunicationCallback
 from f.breeder.engine.strain_loader import load_strain
+from f.breeder.engine.watermark import create_watermark, Watermark
 from f.breeder.shared.otel_logging import get_logger
 
 logger = get_logger(__name__)
@@ -115,6 +116,12 @@ class BreederWorker:
             self._init_rollback_state()
 
         self._trial_durations = []
+
+        settings = config.get('settings', {})
+        self.watermark = create_watermark(config, settings)
+        if self.watermark:
+            logger.info(f"Watermarking enabled: {self.watermark.metadata()}")
+        self._watermark_trial_idx = 0
 
         self._update_state()
 
@@ -748,7 +755,21 @@ class BreederWorker:
 
                 try:
                     params = self.strain.suggest_params(trial, self.config.get('settings', {}))
-                    metrics = self._execute_trial(params)
+
+                    if self.watermark:
+                        wm_complete = hasattr(self.watermark, 'is_complete') and self.watermark.is_complete()
+                        if not wm_complete:
+                            params = self.watermark.generate(self._watermark_trial_idx, params)
+                            trial.set_user_attr('watermark', json.dumps(self.watermark.metadata()))
+                            trial.set_user_attr('watermark_trial_idx', self._watermark_trial_idx)
+                            self._watermark_trial_idx += 1
+                            logger.info(f"Watermark trial {self._watermark_trial_idx}: {self.watermark.metadata().get('type')}")
+
+                    if params:
+                        metrics = self._execute_trial(params)
+                    else:
+                        logger.info(f"Watermark off phase — reconnaissance only")
+                        metrics = self._run_reconnaissance()
 
                     guardrails_violated, violations = self._check_guardrails(metrics)
 

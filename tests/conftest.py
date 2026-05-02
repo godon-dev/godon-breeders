@@ -19,6 +19,7 @@
 
 import sys
 import os
+import types
 from unittest.mock import MagicMock
 
 sys.modules['wmill'] = MagicMock()
@@ -113,6 +114,9 @@ populate_stub_module(sys.modules['f.breeder.strains.bench_greenhouse.preflight']
 import strains.bench_greenhouse.strain as gh_strain
 populate_stub_module(sys.modules['f.breeder.strains.bench_greenhouse.strain'], gh_strain)
 
-# Import breeder worker last (depends on all above)
+sys.modules['f.breeder.engine.watermark'] = types.ModuleType('f.breeder.engine.watermark')
+sys.modules['f.breeder.engine.watermark'].create_watermark = lambda *a, **kw: None
+sys.modules['f.breeder.engine.watermark'].Watermark = type('Watermark', (), {})
+
 import engine.breeder_worker as breeder_worker
 populate_stub_module(sys.modules['f.breeder.engine.breeder_worker'], breeder_worker)
