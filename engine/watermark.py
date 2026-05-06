@@ -249,14 +249,42 @@ class Composite(Watermark):
         return self._current_cycle >= self.cycles
 
 
-def create_watermark(config: Dict[str, Any], params_config: Dict[str, Any]) -> Optional[Watermark]:
+def create_watermark(config: Dict[str, Any], params_config: Dict[str, Any],
+                     override_type: Optional[str] = None) -> Optional[Watermark]:
     interference_config = config.get('interference_detection', {})
     if interference_config.get('mode', 'inactive') != 'active':
         return None
 
-    period = max(5, min(interference_config.get('phase_trials', 10), 20))
+    wm_type = override_type or 'on_off'
 
-    return OnOff(
-        params_config=params_config,
-        period=period,
-    )
+    if wm_type == 'on_off':
+        period = max(5, min(interference_config.get('phase_trials', 10), 20))
+        return OnOff(params_config=params_config, period=period)
+    elif wm_type == 'sinusoidal':
+        return Sinusoidal(
+            params_config=params_config,
+            param_name='',
+            amplitude=0.1,
+            period=20,
+        )
+    elif wm_type == 'step':
+        return Step(
+            params_config=params_config,
+            param_name='',
+            step_fraction=0.2,
+            period=10,
+        )
+    elif wm_type == 'multi_frequency':
+        return MultiFrequency(
+            params_config=params_config,
+            param_names=[],
+            amplitude=0.1,
+            base_period=20,
+        )
+    elif wm_type == 'composite':
+        on_off = OnOff(params_config=params_config, period=10)
+        multi = MultiFrequency(params_config=params_config, param_names=[], amplitude=0.1, base_period=20)
+        return Composite(watermarks=[on_off, multi], cycles=1)
+    else:
+        logger.warning(f"Unknown watermark type: {wm_type}, falling back to on_off")
+        return OnOff(params_config=params_config, period=10)
