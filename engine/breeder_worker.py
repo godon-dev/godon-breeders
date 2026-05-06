@@ -117,11 +117,18 @@ class BreederWorker:
 
         self._trial_durations = []
 
+        self._last_heartbeat_ts = 0
+        self._heartbeat_interval = 120
+
         settings = config.get('settings', {})
-        self.watermark = create_watermark(config, settings)
-        if self.watermark:
-            logger.info(f"Watermarking enabled: {self.watermark.metadata()}")
+        self.watermark = None
+        if self._has_active_neighbors():
+            self.watermark = create_watermark(config, settings)
+            if self.watermark:
+                logger.info(f"Watermarking enabled: {self.watermark.metadata()}")
         self._watermark_trial_idx = 0
+
+        self._register_interference_breeder()
 
         self._update_state()
 
@@ -252,6 +259,77 @@ class BreederWorker:
             'database': self.breeder_db_name
         }
         return f"postgresql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+
+    def _get_shared_db_url(self) -> str:
+        import os
+        return f"postgresql://{os.environ.get('GODON_ARCHIVE_DB_USER', 'postgres')}:{os.environ.get('GODON_ARCHIVE_DB_PASSWORD', 'postgres')}@{os.environ.get('GODON_ARCHIVE_DB_SERVICE_HOST', 'localhost')}:{os.environ.get('GODON_ARCHIVE_DB_SERVICE_PORT', '5432')}/archive_db"
+
+    def _with_shared_db(self, fn, description: str, max_retries: int = 4):
+        last_error = None
+        for attempt in range(max_retries):
+            conn = None
+            try:
+                import psycopg2
+                conn = psycopg2.connect(self._get_shared_db_url())
+                conn.autocommit = True
+                return fn(conn)
+            except Exception as e:
+                last_error = e
+                if attempt < max_retries - 1 and self._is_retryable_error(e):
+                    wait_time = 2 ** attempt
+                    logger.warning(f"{description} attempt {attempt + 1}/{max_retries} failed: {e}, retrying in {wait_time}s")
+                    time.sleep(wait_time)
+                else:
+                    raise
+            finally:
+                if conn:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+        raise last_error
+
+    def _register_interference_breeder(self):
+        def op(conn):
+            cur = conn.cursor()
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS interference_active_breeders (
+                    breeder_id VARCHAR(255) PRIMARY KEY,
+                    last_seen TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            cur.execute(
+                "INSERT INTO interference_active_breeders (breeder_id, last_seen) "
+                "VALUES (%s, NOW()) ON CONFLICT (breeder_id) DO UPDATE SET last_seen = NOW()",
+                (self.breeder_id,)
+            )
+            cur.close()
+        try:
+            self._with_shared_db(op, "register_interference_breeder")
+        except Exception as e:
+            logger.warning(f"Failed to register for interference detection: {e}")
+
+    def _heartbeat_interference(self):
+        if time.time() - self._last_heartbeat_ts < self._heartbeat_interval:
+            return
+        self._last_heartbeat_ts = time.time()
+        self._register_interference_breeder()
+
+    def _has_active_neighbors(self) -> bool:
+        def op(conn):
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT COUNT(*) FROM interference_active_breeders "
+                "WHERE breeder_id != %s AND last_seen > NOW() - INTERVAL '360 seconds'",
+                (self.breeder_id,)
+            )
+            count = cur.fetchone()[0]
+            cur.close()
+            return count > 0
+        try:
+            return self._with_shared_db(op, "has_active_neighbors")
+        except Exception:
+            return False
 
     def _load_or_create_study(self) -> optuna.Study:
         parallel_workers = self.config.get('run', {}).get('parallel', 1)
@@ -834,6 +912,7 @@ class BreederWorker:
 
                     trial_count += 1
                     if trial_count % 5 == 0:
+                        self._heartbeat_interference()
                         self._update_state()
                         self.metrics.set_total_trials(len(self.study.trials))
                         self.metrics.push()
