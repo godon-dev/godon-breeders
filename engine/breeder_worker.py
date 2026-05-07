@@ -120,6 +120,8 @@ class BreederWorker:
         self._last_heartbeat_ts = 0
         self._heartbeat_interval = 120
 
+        self._register_interference_breeder()
+
         settings = config.get('settings', {})
         self.watermark = None
         if self._has_active_neighbors():
@@ -127,8 +129,6 @@ class BreederWorker:
             if self.watermark:
                 logger.info(f"Watermarking enabled: {self.watermark.metadata()}")
         self._watermark_trial_idx = 0
-
-        self._register_interference_breeder()
 
         self._update_state()
 
@@ -833,6 +833,11 @@ class BreederWorker:
 
                 try:
                     params = self.strain.suggest_params(trial, self.config.get('settings', {}))
+
+                    if not self.watermark and self._has_active_neighbors():
+                        self.watermark = create_watermark(self.config, self.config.get('settings', {}))
+                        if self.watermark:
+                            logger.info(f"Watermarking activated (lazy): {self.watermark.metadata()}")
 
                     if self.watermark:
                         wm_complete = hasattr(self.watermark, 'is_complete') and self.watermark.is_complete()
