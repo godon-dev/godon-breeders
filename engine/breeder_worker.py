@@ -842,11 +842,16 @@ class BreederWorker:
                     if self.watermark:
                         wm_complete = hasattr(self.watermark, 'is_complete') and self.watermark.is_complete()
                         if not wm_complete:
-                            params = self.watermark.generate(self._watermark_trial_idx, params)
-                            trial.set_user_attr('watermark', json.dumps(self.watermark.metadata()))
-                            trial.set_user_attr('watermark_trial_idx', self._watermark_trial_idx)
+                            wm_params = self.watermark.generate(self._watermark_trial_idx, params)
+                            if wm_params:
+                                params = wm_params
+                                trial.set_user_attr('watermark', json.dumps(self.watermark.metadata()))
+                                trial.set_user_attr('watermark_trial_idx', self._watermark_trial_idx)
+                            else:
+                                trial.set_user_attr('watermark', 'off')
+                                trial.set_user_attr('watermark_trial_idx', self._watermark_trial_idx)
                             self._watermark_trial_idx += 1
-                            logger.info(f"Watermark trial {self._watermark_trial_idx}: {self.watermark.metadata().get('type')}")
+                            logger.info(f"Watermark trial {self._watermark_trial_idx}: {'on' if wm_params else 'off'}")
 
                     if params:
                         metrics = self._execute_trial(params)
