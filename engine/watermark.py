@@ -1,4 +1,5 @@
 import math
+import random
 from typing import Dict, Any, Optional, List
 from f.breeder.shared.otel_logging import get_logger
 
@@ -59,11 +60,12 @@ class OnOff(Watermark):
 
 class Sinusoidal(Watermark):
     def __init__(self, params_config: Dict[str, Any], param_name: str,
-                 amplitude: float = 0.1, period: int = 20):
+                 amplitude: float = 0.1, period: int = 20, phase_offset: float = 0.0):
         super().__init__(params_config)
         self.param_name = param_name
         self.amplitude = amplitude
         self.period = period
+        self.phase_offset = phase_offset
         self._param_ranges = self._extract_ranges(params_config)
 
     def _extract_ranges(self, params_config) -> Dict[str, tuple]:
@@ -81,7 +83,7 @@ class Sinusoidal(Watermark):
         result = dict(base_params)
         if self.param_name in base_params:
             base_val = base_params[self.param_name]
-            offset = self.amplitude * math.sin(2 * math.pi * trial_idx / self.period)
+            offset = self.amplitude * math.sin(2 * math.pi * trial_idx / self.period + self.phase_offset)
             if isinstance(base_val, list):
                 result[self.param_name] = [
                     self._clamp(v + offset, *self._param_ranges.get(self.param_name, (v * 0.5, v * 1.5)))
@@ -99,6 +101,7 @@ class Sinusoidal(Watermark):
             'param_name': self.param_name,
             'amplitude': self.amplitude,
             'period': self.period,
+            'phase_offset': round(self.phase_offset, 4),
         }
 
     def cycle_count(self) -> int:
@@ -263,11 +266,13 @@ def create_watermark(config: Dict[str, Any], params_config: Dict[str, Any],
     elif wm_type == 'sinusoidal':
         param_name, amplitude = _pick_param_and_amplitude(params_config)
         period = max(10, min(interference_config.get('phase_trials', 20), 40))
+        phase_offset = random.uniform(0, 2 * math.pi)
         return Sinusoidal(
             params_config=params_config,
             param_name=param_name,
             amplitude=amplitude,
             period=period,
+            phase_offset=phase_offset,
         )
     elif wm_type == 'step':
         param_name, _ = _pick_param_and_amplitude(params_config)
