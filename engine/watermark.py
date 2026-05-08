@@ -255,36 +255,77 @@ def create_watermark(config: Dict[str, Any], params_config: Dict[str, Any],
     if interference_config.get('mode', 'inactive') != 'active':
         return None
 
-    wm_type = override_type or 'on_off'
+    wm_type = override_type or 'sinusoidal'
 
     if wm_type == 'on_off':
         period = max(5, min(interference_config.get('phase_trials', 10), 20))
         return OnOff(params_config=params_config, period=period)
     elif wm_type == 'sinusoidal':
+        param_name, amplitude = _pick_param_and_amplitude(params_config)
+        period = max(10, min(interference_config.get('phase_trials', 20), 40))
         return Sinusoidal(
             params_config=params_config,
-            param_name='',
-            amplitude=0.1,
-            period=20,
+            param_name=param_name,
+            amplitude=amplitude,
+            period=period,
         )
     elif wm_type == 'step':
+        param_name, _ = _pick_param_and_amplitude(params_config)
         return Step(
             params_config=params_config,
-            param_name='',
-            step_fraction=0.2,
+            param_name=param_name,
+            step_fraction=0.3,
             period=10,
         )
     elif wm_type == 'multi_frequency':
+        param_names = _pick_multi_params(params_config, count=3)
         return MultiFrequency(
             params_config=params_config,
-            param_names=[],
-            amplitude=0.1,
+            param_names=param_names,
+            amplitude=0.15,
             base_period=20,
         )
     elif wm_type == 'composite':
         on_off = OnOff(params_config=params_config, period=10)
-        multi = MultiFrequency(params_config=params_config, param_names=[], amplitude=0.1, base_period=20)
+        multi = MultiFrequency(params_config=params_config, param_names=_pick_multi_params(params_config, count=3), amplitude=0.15, base_period=20)
         return Composite(watermarks=[on_off, multi], cycles=1)
     else:
-        logger.warning(f"Unknown watermark type: {wm_type}, falling back to on_off")
-        return OnOff(params_config=params_config, period=10)
+        logger.warning(f"Unknown watermark type: {wm_type}, falling back to sinusoidal")
+        param_name, amplitude = _pick_param_and_amplitude(params_config)
+        return Sinusoidal(params_config=params_config, param_name=param_name, amplitude=amplitude, period=20)
+
+
+def _pick_param_and_amplitude(params_config: Dict[str, Any]) -> tuple:
+    best_name = ''
+    best_range = 0.0
+    best_mid = 1.0
+    gh_settings = params_config.get('greenhouse', params_config)
+    for pname, pconfig in gh_settings.items():
+        if not isinstance(pconfig, dict) or 'constraints' not in pconfig:
+            continue
+        for c in pconfig['constraints']:
+            if 'lower' in c and 'upper' in c:
+                r = c['upper'] - c['lower']
+                if r > best_range:
+                    best_range = r
+                    best_name = pname
+                    best_mid = (c['lower'] + c['upper']) / 2.0
+    if not best_name:
+        best_name = 'light_intensity'
+        best_mid = 500.0
+        best_range = 1000.0
+    amplitude = 0.3 * best_mid
+    return best_name, amplitude
+
+
+def _pick_multi_params(params_config: Dict[str, Any], count: int = 3) -> List[str]:
+    candidates = []
+    gh_settings = params_config.get('greenhouse', params_config)
+    for pname, pconfig in gh_settings.items():
+        if not isinstance(pconfig, dict) or 'constraints' not in pconfig:
+            continue
+        for c in pconfig['constraints']:
+            if 'lower' in c and 'upper' in c:
+                candidates.append((c['upper'] - c['lower'], pname))
+    candidates.sort(reverse=True)
+    return [name for _, name in candidates[:count]]
