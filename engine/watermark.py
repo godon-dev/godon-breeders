@@ -84,12 +84,12 @@ class Sinusoidal(Watermark):
             offset = self.amplitude * math.sin(2 * math.pi * trial_idx / self.period)
             if isinstance(base_val, list):
                 result[self.param_name] = [
-                    self._clamp(v + offset * abs(v), *self._param_ranges.get(self.param_name, (v * 0.5, v * 1.5)))
+                    self._clamp(v + offset, *self._param_ranges.get(self.param_name, (v * 0.5, v * 1.5)))
                     for v in base_val
                 ]
             else:
                 lo, hi = self._param_ranges.get(self.param_name, (base_val * 0.5, base_val * 1.5))
-                result[self.param_name] = self._clamp(base_val + offset * abs(base_val), lo, hi)
+                result[self.param_name] = self._clamp(base_val + offset, lo, hi)
         self._trial_count += 1
         return result
 
@@ -314,7 +314,7 @@ def _pick_param_and_amplitude(params_config: Dict[str, Any]) -> tuple:
         best_name = 'light_intensity'
         best_mid = 500.0
         best_range = 1000.0
-    amplitude = 0.3 * best_mid
+    amplitude = 0.15 * best_mid
     return best_name, amplitude
 
 
