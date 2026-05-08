@@ -129,6 +129,7 @@ class BreederWorker:
             if self.watermark:
                 logger.info(f"Watermarking enabled: {self.watermark.metadata()}")
         self._watermark_trial_idx = 0
+        self._watermark_baseline = self._compute_baseline_params(settings)
 
         self._update_state()
 
@@ -288,6 +289,16 @@ class BreederWorker:
                     except Exception:
                         pass
         raise last_error
+
+    def _compute_baseline_params(self, settings: Dict[str, Any]) -> Dict[str, float]:
+        baseline = {}
+        for key, spec in settings.items():
+            constraints = spec.get('constraints', [])
+            if constraints and len(constraints) > 0:
+                lower = constraints[0].get('lower', 0)
+                upper = constraints[0].get('upper', 1)
+                baseline[key] = (lower + upper) / 2.0
+        return baseline
 
     def _register_interference_breeder(self):
         def op(conn):
@@ -856,7 +867,11 @@ class BreederWorker:
                     if params:
                         metrics = self._execute_trial(params)
                     else:
-                        logger.info(f"Watermark off phase — reconnaissance only")
+                        logger.info(f"Watermark off phase — resetting to baseline then reconnaissance")
+                        try:
+                            self._execute_trial(self._watermark_baseline)
+                        except Exception as e:
+                            logger.warning(f"Baseline effectuation failed (non-fatal): {e}")
                         metrics = self._run_reconnaissance()
 
                     guardrails_violated, violations = self._check_guardrails(metrics)
