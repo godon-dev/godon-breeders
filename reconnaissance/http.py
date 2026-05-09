@@ -75,15 +75,17 @@ def _aggregate_samples(samples: List[float], method: str = 'median') -> float:
 
 
 def _compute_cv(samples: List[float]) -> float:
-    valid = [s for s in samples if s is not None and s != float('inf') and s != 0.0]
-    if len(valid) < 2:
+    finite = [s for s in samples if s is not None and s != float('inf')]
+    if len(finite) < 2:
         return float('inf')
-    med = statistics.median(valid)
+    med = statistics.median(finite)
     if med == 0.0:
-        med = statistics.mean([abs(v) for v in valid])
-    if med == 0.0:
-        return 0.0
-    mad = statistics.median([abs(v - statistics.median(valid)) for v in valid])
+        mean_abs = statistics.mean([abs(v) for v in finite])
+        if mean_abs == 0.0:
+            return 0.0
+        mad = statistics.median([abs(v - med) for v in finite])
+        return mad / mean_abs
+    mad = statistics.median([abs(v - med) for v in finite])
     return mad / abs(med)
 
 
@@ -108,7 +110,7 @@ def _gather_single_metric(base_url: str, metric_name: str, recon_config: Dict[st
 
         stabilization_seconds = recon_config.get('stabilization_seconds', 2)
         min_samples = recon_config.get('samples', 1)
-        max_samples = recon_config.get('max_samples', min_samples * 4)
+        max_samples = recon_config.get('max_samples', min_samples)
         interval = recon_config.get('interval', 0)
         timeout = recon_config.get('timeout_seconds', 30)
         cv_threshold = recon_config.get('cv_threshold', 0.05)

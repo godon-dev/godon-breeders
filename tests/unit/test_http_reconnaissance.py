@@ -232,7 +232,7 @@ class TestGatherSingleMetric:
 class TestHttpReconnaissanceMain:
     @patch('reconnaissance.http._gather_single_metric')
     def test_gathers_objective_metrics(self, mock_gather):
-        mock_gather.return_value = 0.85
+        mock_gather.return_value = {'value': 0.85, 'noise_cv': None}
 
         context = {
             'reconnaissance': {
@@ -257,7 +257,7 @@ class TestHttpReconnaissanceMain:
 
     @patch('reconnaissance.http._gather_single_metric')
     def test_gathers_guardrail_metrics(self, mock_gather):
-        mock_gather.return_value = 38.5
+        mock_gather.return_value = {'value': 38.5, 'noise_cv': None}
 
         context = {
             'reconnaissance': {
@@ -281,7 +281,7 @@ class TestHttpReconnaissanceMain:
 
     @patch('reconnaissance.http._gather_single_metric')
     def test_per_objective_url_override(self, mock_gather):
-        mock_gather.return_value = 10.0
+        mock_gather.return_value = {'value': 10.0, 'noise_cv': None}
 
         context = {
             'reconnaissance': {
@@ -317,7 +317,11 @@ class TestHttpReconnaissanceMain:
 
     @patch('reconnaissance.http._gather_single_metric')
     def test_multiple_objectives(self, mock_gather):
-        mock_gather.side_effect = [0.9, 12.5, 3.2]
+        mock_gather.side_effect = [
+            {'value': 0.9, 'noise_cv': None},
+            {'value': 12.5, 'noise_cv': None},
+            {'value': 3.2, 'noise_cv': None},
+        ]
 
         context = {
             'reconnaissance': {
@@ -419,11 +423,12 @@ class TestAdaptiveSampling:
     @patch('reconnaissance.http.time.sleep')
     @patch('reconnaissance.http._http_get_with_retry')
     def test_keeps_sampling_when_noisy(self, mock_http, mock_sleep):
-        import random
-        random.seed(42)
-        noisy = [{'temp': 100.0 + random.gauss(0, 20)} for _ in range(20)]
-
-        mock_http.side_effect = noisy
+        mock_http.side_effect = [
+            {'temp': 80.0}, {'temp': 120.0}, {'temp': 60.0},
+            {'temp': 140.0}, {'temp': 50.0}, {'temp': 130.0},
+            {'temp': 70.0}, {'temp': 110.0}, {'temp': 90.0},
+            {'temp': 100.0},
+        ]
 
         recon_config = {
             'service': 'http',
