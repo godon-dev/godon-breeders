@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
-from reconnaissance.http import _http_get_with_retry, _aggregate_samples, _gather_single_metric, main as recon_main
+from reconnaissance.http import _http_get_with_retry, _aggregate_samples, _gather_single_metric, _compute_cv, _sprt_sample_stable, main as recon_main
 
 
 class TestHttpGetWithRetry:
@@ -141,7 +141,7 @@ class TestGatherSingleMetric:
         }
 
         result = _gather_single_metric('http://localhost:8090', 'growth_rate', recon_config)
-        assert result == 0.85
+        assert result['value'] == 0.85
         mock_sleep.assert_not_called()
 
     @patch('reconnaissance.http.time.sleep')
@@ -160,7 +160,7 @@ class TestGatherSingleMetric:
         }
 
         result = _gather_single_metric('http://localhost:8090', 'growth_rate', recon_config)
-        assert result == 0.9
+        assert result['value'] == 0.9
         mock_sleep.assert_any_call(5)
 
     @patch('reconnaissance.http.time.sleep')
@@ -179,7 +179,7 @@ class TestGatherSingleMetric:
         }
 
         result = _gather_single_metric('http://localhost:8090', 'energy', recon_config)
-        assert result == 12.5
+        assert result['value'] == 12.5
         assert mock_http.call_count == 3
         interval_calls = [c for c in mock_sleep.call_args_list if c[0][0] == 2]
         assert len(interval_calls) == 2
@@ -199,7 +199,7 @@ class TestGatherSingleMetric:
         }
 
         result = _gather_single_metric('http://localhost:8090', 'growth_rate', recon_config)
-        assert result == float('inf')
+        assert result['value'] == float('inf')
 
     @patch('reconnaissance.http._http_get_with_retry')
     def test_http_failure_returns_inf(self, mock_http):
@@ -216,7 +216,7 @@ class TestGatherSingleMetric:
         }
 
         result = _gather_single_metric('http://localhost:8090', 'growth_rate', recon_config)
-        assert result == float('inf')
+        assert result['value'] == float('inf')
 
     def test_unsupported_service_returns_inf(self):
         recon_config = {
@@ -226,13 +226,13 @@ class TestGatherSingleMetric:
         }
 
         result = _gather_single_metric('http://localhost:8090', 'growth_rate', recon_config)
-        assert result == float('inf')
+        assert result['value'] == float('inf')
 
 
 class TestHttpReconnaissanceMain:
     @patch('reconnaissance.http._gather_single_metric')
     def test_gathers_objective_metrics(self, mock_gather):
-        mock_gather.return_value = 0.85
+        mock_gather.return_value = {'value': 0.85, 'noise_cv': None}
 
         context = {
             'reconnaissance': {
@@ -257,7 +257,7 @@ class TestHttpReconnaissanceMain:
 
     @patch('reconnaissance.http._gather_single_metric')
     def test_gathers_guardrail_metrics(self, mock_gather):
-        mock_gather.return_value = 38.5
+        mock_gather.return_value = {'value': 38.5, 'noise_cv': None}
 
         context = {
             'reconnaissance': {
@@ -281,7 +281,7 @@ class TestHttpReconnaissanceMain:
 
     @patch('reconnaissance.http._gather_single_metric')
     def test_per_objective_url_override(self, mock_gather):
-        mock_gather.return_value = 10.0
+        mock_gather.return_value = {'value': 10.0, 'noise_cv': None}
 
         context = {
             'reconnaissance': {
@@ -317,7 +317,11 @@ class TestHttpReconnaissanceMain:
 
     @patch('reconnaissance.http._gather_single_metric')
     def test_multiple_objectives(self, mock_gather):
-        mock_gather.side_effect = [0.9, 12.5, 3.2]
+        mock_gather.side_effect = [
+            {'value': 0.9, 'noise_cv': None},
+            {'value': 12.5, 'noise_cv': None},
+            {'value': 3.2, 'noise_cv': None},
+        ]
 
         context = {
             'reconnaissance': {
@@ -335,3 +339,167 @@ class TestHttpReconnaissanceMain:
         assert result['metrics']['growth_rate'] == 0.9
         assert result['metrics']['trial_energy_kwh'] == 12.5
         assert result['metrics']['trial_water_liters'] == 3.2
+
+
+class TestComputeCV:
+    def test_low_cv_stable_signal(self):
+        cv = _compute_cv([10.0, 10.1, 9.9, 10.0, 10.05])
+        assert cv < 0.02
+
+    def test_high_cv_noisy_signal(self):
+        cv = _compute_cv([10.0, 50.0, 5.0, 100.0, 2.0])
+        assert cv > 0.3
+
+    def test_single_sample_returns_inf(self):
+        cv = _compute_cv([10.0])
+        assert cv == float('inf')
+
+    def test_empty_returns_inf(self):
+        cv = _compute_cv([])
+        assert cv == float('inf')
+
+    def test_none_values_filtered(self):
+        cv = _compute_cv([10.0, None, 10.1, None, 9.9])
+        assert cv < 0.02
+
+    def test_zero_median_uses_mean_abs(self):
+        cv = _compute_cv([0.0, 0.0, 0.0])
+        assert cv == 0.0
+
+    def test_negative_values(self):
+        cv = _compute_cv([-10.0, -10.1, -9.9, -10.0])
+        assert cv < 0.02
+
+    def test_large_values(self):
+        cv = _compute_cv([1000000.0, 1000001.0, 999999.0])
+        assert cv < 0.001
+
+
+class TestSprtSampleStable:
+    def test_stable_with_3_samples(self):
+        assert _sprt_sample_stable([10.0, 10.01, 9.99]) is True
+
+    def test_unstable_with_3_samples(self):
+        assert _sprt_sample_stable([10.0, 50.0, 2.0]) is False
+
+    def test_too_few_samples(self):
+        assert _sprt_sample_stable([10.0, 10.0]) is False
+        assert _sprt_sample_stable([10.0]) is False
+        assert _sprt_sample_stable([]) is False
+
+    def test_custom_threshold(self):
+        assert _sprt_sample_stable([10.0, 10.5, 9.5], threshold_cv=0.1) is True
+        assert _sprt_sample_stable([10.0, 10.5, 9.5], threshold_cv=0.01) is False
+
+    def test_exactly_at_threshold(self):
+        samples = [100.0, 105.0, 95.0]
+        cv = _compute_cv(samples)
+        assert _sprt_sample_stable(samples, threshold_cv=cv + 0.001) is True
+        assert _sprt_sample_stable(samples, threshold_cv=cv - 0.001) is False
+
+
+class TestAdaptiveSampling:
+    @patch('reconnaissance.http.time.sleep')
+    @patch('reconnaissance.http._http_get_with_retry')
+    def test_stops_early_when_stable(self, mock_http, mock_sleep):
+        mock_http.side_effect = [{'temp': 100.0}] * 3 + [{'temp': 200.0}] * 20
+
+        recon_config = {
+            'service': 'http',
+            'path': '/metrics/json',
+            'key': 'temp',
+            'stabilization_seconds': 0,
+            'samples': 3,
+            'max_samples': 20,
+            'interval': 0,
+            'aggregation': 'median',
+            'cv_threshold': 0.05,
+        }
+
+        result = _gather_single_metric('http://localhost:8090', 'temp', recon_config)
+        assert result['value'] == 100.0
+        assert mock_http.call_count == 3
+
+    @patch('reconnaissance.http.time.sleep')
+    @patch('reconnaissance.http._http_get_with_retry')
+    def test_keeps_sampling_when_noisy(self, mock_http, mock_sleep):
+        mock_http.side_effect = [
+            {'temp': 80.0}, {'temp': 120.0}, {'temp': 60.0},
+            {'temp': 140.0}, {'temp': 50.0}, {'temp': 130.0},
+            {'temp': 70.0}, {'temp': 110.0}, {'temp': 90.0},
+            {'temp': 100.0},
+        ]
+
+        recon_config = {
+            'service': 'http',
+            'path': '/metrics/json',
+            'key': 'temp',
+            'stabilization_seconds': 0,
+            'samples': 3,
+            'max_samples': 20,
+            'interval': 0,
+            'aggregation': 'median',
+            'cv_threshold': 0.01,
+        }
+
+        result = _gather_single_metric('http://localhost:8090', 'temp', recon_config)
+        assert mock_http.call_count > 3
+        assert mock_http.call_count <= 20
+
+    @patch('reconnaissance.http.time.sleep')
+    @patch('reconnaissance.http._http_get_with_retry')
+    def test_respects_max_samples(self, mock_http, mock_sleep):
+        mock_http.side_effect = [{'temp': float(i)} for i in range(100)]
+
+        recon_config = {
+            'service': 'http',
+            'path': '/metrics/json',
+            'key': 'temp',
+            'stabilization_seconds': 0,
+            'samples': 3,
+            'max_samples': 8,
+            'interval': 0,
+            'aggregation': 'median',
+            'cv_threshold': 0.001,
+        }
+
+        result = _gather_single_metric('http://localhost:8090', 'temp', recon_config)
+        assert mock_http.call_count == 8
+
+    @patch('reconnaissance.http.time.sleep')
+    @patch('reconnaissance.http._http_get_with_retry')
+    def test_backward_compat_no_max_samples(self, mock_http, mock_sleep):
+        mock_http.return_value = {'temp': 42.0}
+
+        recon_config = {
+            'service': 'http',
+            'path': '/metrics/json',
+            'key': 'temp',
+            'stabilization_seconds': 0,
+            'samples': 5,
+            'interval': 0,
+            'aggregation': 'median',
+        }
+
+        result = _gather_single_metric('http://localhost:8090', 'temp', recon_config)
+        assert result['value'] == 42.0
+        assert mock_http.call_count == 5
+
+    @patch('reconnaissance.http.time.sleep')
+    @patch('reconnaissance.http._http_get_with_retry')
+    def test_backward_compat_single_sample(self, mock_http, mock_sleep):
+        mock_http.return_value = {'temp': 42.0}
+
+        recon_config = {
+            'service': 'http',
+            'path': '/metrics/json',
+            'key': 'temp',
+            'stabilization_seconds': 0,
+            'samples': 1,
+            'interval': 0,
+            'aggregation': 'median',
+        }
+
+        result = _gather_single_metric('http://localhost:8090', 'temp', recon_config)
+        assert result['value'] == 42.0
+        assert mock_http.call_count == 1

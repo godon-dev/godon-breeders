@@ -119,6 +119,7 @@ class BreederWorker:
 
         self._last_heartbeat_ts = 0
         self._heartbeat_interval = 120
+        self._last_metric_noise = {}
 
         self._register_interference_breeder()
 
@@ -427,6 +428,8 @@ class BreederWorker:
         if not metrics:
             logger.error("No metrics returned from reconnaissance")
             return {obj.get('name'): float('inf') for obj in self.config.get('objectives', [])}
+
+        self._last_metric_noise = recon_result.get('metric_noise', {})
 
         return metrics
 
@@ -909,6 +912,8 @@ class BreederWorker:
                         self.metrics.inc_effectuation('failure')
                     else:
                         values = [metrics.get(obj.get('name')) for obj in self.config.get('objectives', [])]
+                        if self._last_metric_noise:
+                            trial.set_user_attr('metric_noise', json.dumps(self._last_metric_noise))
                         self._retry_op(
                             lambda: self.study.tell(trial, values),
                             f"study.tell (trial {trial.number})"
