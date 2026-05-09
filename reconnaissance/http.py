@@ -74,12 +74,32 @@ def _aggregate_samples(samples: List[float], method: str = 'median') -> float:
         return statistics.median(valid_samples)
 
 
-def _gather_single_metric(base_url: str, metric_name: str, recon_config: Dict[str, Any]) -> float:
+def _compute_cv(samples: List[float]) -> float:
+    valid = [s for s in samples if s is not None and s != float('inf') and s != 0.0]
+    if len(valid) < 2:
+        return float('inf')
+    med = statistics.median(valid)
+    if med == 0.0:
+        med = statistics.mean([abs(v) for v in valid])
+    if med == 0.0:
+        return 0.0
+    mad = statistics.median([abs(v - statistics.median(valid)) for v in valid])
+    return mad / abs(med)
+
+
+def _sprt_sample_stable(samples: List[float], threshold_cv: float = 0.05) -> bool:
+    if len(samples) < 3:
+        return False
+    cv = _compute_cv(samples)
+    return cv < threshold_cv
+
+
+def _gather_single_metric(base_url: str, metric_name: str, recon_config: Dict[str, Any]) -> Dict[str, Any]:
     recon_service = recon_config.get('service')
 
     if recon_service != 'http':
         logger.error(f"Unsupported reconnaissance service: {recon_service}")
-        return float('inf')
+        return {'value': float('inf'), 'noise_cv': None}
 
     try:
         path = recon_config.get('path', '')
@@ -87,52 +107,62 @@ def _gather_single_metric(base_url: str, metric_name: str, recon_config: Dict[st
         url = f"{base_url.rstrip('/')}{path}"
 
         stabilization_seconds = recon_config.get('stabilization_seconds', 2)
-        samples = recon_config.get('samples', 1)
+        min_samples = recon_config.get('samples', 1)
+        max_samples = recon_config.get('max_samples', min_samples * 4)
         interval = recon_config.get('interval', 0)
         timeout = recon_config.get('timeout_seconds', 30)
+        cv_threshold = recon_config.get('cv_threshold', 0.05)
 
         if stabilization_seconds > 0:
             logger.info(f"Waiting {stabilization_seconds}s for stabilization")
             time.sleep(stabilization_seconds)
 
-        logger.info(f"Collecting {samples} samples from {url} (key={key})")
+        logger.info(f"Collecting {min_samples}-{max_samples} samples from {url} (key={key})")
 
         sample_values = []
 
-        for i in range(samples):
+        def _take_sample(idx):
             data = _http_get_with_retry(url, timeout=timeout)
-
             if key not in data:
                 logger.warning(f"Key '{key}' not found in response. Available keys: {list(data.keys())}")
-                sample_values.append(None)
+                return None
+            value = data[key]
+            if value is not None:
+                value = float(value)
+            if value is not None:
+                logger.debug(f"Sample {idx+1}: {value}")
             else:
-                value = data[key]
-                if value is not None:
-                    value = float(value)
-                sample_values.append(value)
+                logger.debug(f"Sample {idx+1}: null value for key '{key}'")
+            return value
 
-                if value is not None:
-                    logger.debug(f"Sample {i+1}/{samples}: {value}")
-                else:
-                    logger.debug(f"Sample {i+1}/{samples}: null value for key '{key}'")
+        for i in range(min_samples):
+            sample_values.append(_take_sample(i))
+            if i < min_samples - 1 and interval > 0:
+                time.sleep(interval)
 
-            if i < samples - 1 and interval > 0:
+        while len(sample_values) < max_samples:
+            if _sprt_sample_stable(sample_values, cv_threshold):
+                logger.info(f"Sample stability reached at {len(sample_values)} samples (CV < {cv_threshold})")
+                break
+            sample_values.append(_take_sample(len(sample_values)))
+            if interval > 0:
                 time.sleep(interval)
 
         aggregation_method = recon_config.get('aggregation', 'median')
         final_value = _aggregate_samples(sample_values, aggregation_method)
+        noise_cv = _compute_cv(sample_values)
 
         if final_value == float('inf'):
             logger.warning(f"All samples returned invalid values for {metric_name}")
         else:
             valid_count = len([s for s in sample_values if s is not None])
-            logger.info(f"Metric {metric_name}: {final_value} (using {aggregation_method} of {valid_count} samples)")
+            logger.info(f"Metric {metric_name}: {final_value} (using {aggregation_method} of {valid_count} samples, CV={noise_cv:.4f})")
 
-        return final_value
+        return {'value': final_value, 'noise_cv': round(noise_cv, 6) if noise_cv != float('inf') else None}
 
     except Exception as e:
         logger.error(f"Failed to gather metric {metric_name}: {e}")
-        return float('inf')
+        return {'value': float('inf'), 'noise_cv': None}
 
 
 def main(context: Dict[str, Any], targets: List[Dict[str, Any]], settings: Dict[str, Any] = None) -> Dict[str, Any]:
@@ -144,6 +174,7 @@ def main(context: Dict[str, Any], targets: List[Dict[str, Any]], settings: Dict[
     logger.info(f"Default HTTP URL: {global_url}")
 
     metric_data = {}
+    metric_noise = {}
 
     for objective in context.get('objectives', []):
         objective_name = objective.get('name')
@@ -155,8 +186,10 @@ def main(context: Dict[str, Any], targets: List[Dict[str, Any]], settings: Dict[
         if recon_config.get('url'):
             logger.info(f"Using per-objective HTTP URL: {base_url}")
 
-        value = _gather_single_metric(base_url, objective_name, recon_config)
-        metric_data[objective_name] = value
+        result = _gather_single_metric(base_url, objective_name, recon_config)
+        metric_data[objective_name] = result['value']
+        if result.get('noise_cv') is not None:
+            metric_noise[objective_name] = result['noise_cv']
 
     for guardrail in context.get('guardrails', []):
         guardrail_name = guardrail.get('name')
@@ -168,12 +201,15 @@ def main(context: Dict[str, Any], targets: List[Dict[str, Any]], settings: Dict[
         if recon_config.get('url'):
             logger.info(f"Using per-guardrail HTTP URL: {base_url}")
 
-        value = _gather_single_metric(base_url, guardrail_name, recon_config)
-        metric_data[guardrail_name] = value
+        result = _gather_single_metric(base_url, guardrail_name, recon_config)
+        metric_data[guardrail_name] = result['value']
+        if result.get('noise_cv') is not None:
+            metric_noise[guardrail_name] = result['noise_cv']
 
     logger.info(f"HTTP reconnaissance completed with {len(metric_data)} metrics")
 
     return {
         'status': 'completed',
-        'metrics': metric_data
+        'metrics': metric_data,
+        'metric_noise': metric_noise,
     }
