@@ -1,0 +1,12 @@
+name: bench_microgrid_strain
+target: breeder/strains/bench_microgrid
+workspace: godon
+
+scripts:
+  - pattern: "*.py"
+    settings:
+      summary: "Microgrid Bench Strain"
+      description: "Domain knowledge for microgrid simulation optimization - parameter registry, preflight validation, and suggestion logic for power grid management"
+      tag: "breeder"
+
+flows: []
