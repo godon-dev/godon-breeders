@@ -126,7 +126,7 @@ class BreederWorker:
         settings = config.get('settings', {})
         self.watermark = None
         if self._has_active_neighbors():
-            self.watermark = create_watermark(config, settings)
+            self.watermark = create_watermark(config, settings, breeder_uuid=self.breeder_uuid)
             if self.watermark:
                 logger.info(f"Watermarking enabled: {self.watermark.metadata()}")
         self._watermark_trial_idx = 0
@@ -849,7 +849,7 @@ class BreederWorker:
                     params = self.strain.suggest_params(trial, self.config.get('settings', {}))
 
                     if not self.watermark and self._has_active_neighbors():
-                        self.watermark = create_watermark(self.config, self.config.get('settings', {}))
+                        self.watermark = create_watermark(self.config, self.config.get('settings', {}), breeder_uuid=self.breeder_uuid)
                         if self.watermark:
                             logger.info(f"Watermarking activated (lazy): {self.watermark.metadata()}")
 
