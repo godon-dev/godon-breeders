@@ -1,3 +1,4 @@
+import hashlib
 import math
 import random
 from typing import Dict, Any, Optional, List
@@ -42,8 +43,8 @@ class Sinusoidal(Watermark):
 
     def _extract_ranges(self, params_config) -> Dict[str, tuple]:
         ranges = {}
-        gh_settings = params_config.get('greenhouse', params_config)
-        for pname, pconfig in gh_settings.items():
+        settings = params_config.get('greenhouse', params_config.get('microgrid', params_config))
+        for pname, pconfig in settings.items():
             if not isinstance(pconfig, dict) or 'constraints' not in pconfig:
                 continue
             for c in pconfig['constraints']:
@@ -81,13 +82,20 @@ class Sinusoidal(Watermark):
 
 
 def create_watermark(config: Dict[str, Any], params_config: Dict[str, Any],
-                     override_type: Optional[str] = None) -> Optional[Watermark]:
+                     override_type: Optional[str] = None, breeder_uuid: Optional[str] = None) -> Optional[Watermark]:
     interference_config = config.get('interference_detection', {})
     if interference_config.get('mode', 'inactive') != 'active':
         return None
 
     param_name, amplitude = _pick_param_and_amplitude(params_config)
-    period = max(10, min(interference_config.get('phase_trials', 20), 40))
+
+    period_candidates = [17, 23, 29, 37]
+    if breeder_uuid:
+        idx = int(hashlib.md5(breeder_uuid.encode()).hexdigest(), 16) % len(period_candidates)
+        period = period_candidates[idx]
+    else:
+        period = max(10, min(interference_config.get('phase_trials', 20), 40))
+
     phase_offset = random.uniform(0, 2 * math.pi)
     return Sinusoidal(
         params_config=params_config,
@@ -102,8 +110,8 @@ def _pick_param_and_amplitude(params_config: Dict[str, Any]) -> tuple:
     best_name = ''
     best_range = 0.0
     best_mid = 1.0
-    gh_settings = params_config.get('greenhouse', params_config)
-    for pname, pconfig in gh_settings.items():
+    settings = params_config.get('greenhouse', params_config.get('microgrid', params_config))
+    for pname, pconfig in settings.items():
         if not isinstance(pconfig, dict) or 'constraints' not in pconfig:
             continue
         for c in pconfig['constraints']:
