@@ -12,6 +12,7 @@ logger = get_logger(__name__)
 STRAIN_MODULES = {
     "linux_performance": "f.breeder.strains.linux_performance.strain",
     "bench_greenhouse": "f.breeder.strains.bench_greenhouse.strain",
+    "bench_microgrid": "f.breeder.strains.bench_microgrid.strain",
 }
 
 REQUIRED_ATTRS = ("suggest_params", "validate_config")

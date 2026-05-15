@@ -1,0 +1,104 @@
+from f.breeder.strains.bench_microgrid.parameter_registry import PARAMETER_REGISTRY
+from f.breeder.shared.otel_logging import get_logger
+
+logger = get_logger(__name__)
+
+
+def main(config=None, strict_mode=True):
+    if not config:
+        return {
+            "result": "FAILURE",
+            "error": "Missing config parameter"
+        }
+
+    errors = []
+    warnings = []
+
+    meta_section = config.get('meta', {})
+    if 'strict_validation' in meta_section:
+        strict_mode = meta_section['strict_validation']
+
+    try:
+        settings = config.get('settings', {})
+        mg_settings = settings.get('microgrid', settings)
+
+        if not isinstance(mg_settings, dict):
+            return {
+                "result": "FAILURE",
+                "error": "settings.microgrid must be a dict"
+            }
+
+        for param_name, param_config in mg_settings.items():
+            if not isinstance(param_config, dict):
+                errors.append(f"settings.microgrid.{param_name}: must be a dict")
+                continue
+
+            if param_name not in PARAMETER_REGISTRY:
+                if strict_mode:
+                    errors.append(
+                        f"settings.microgrid.{param_name}: unsupported parameter. "
+                        f"Supported: {', '.join(PARAMETER_REGISTRY.keys())}"
+                    )
+                    continue
+                else:
+                    warnings.append(
+                        f"settings.microgrid.{param_name}: unknown parameter, "
+                        f"skipping registry validation"
+                    )
+
+            if 'constraints' not in param_config:
+                errors.append(f"settings.microgrid.{param_name}: missing 'constraints'")
+                continue
+
+            constraints = param_config['constraints']
+
+            if isinstance(constraints, dict):
+                if 'values' in constraints:
+                    constraints = [constraints]
+                else:
+                    errors.append(f"settings.microgrid.{param_name}: constraints dict must have 'values' key")
+                    continue
+
+            if not isinstance(constraints, list):
+                errors.append(f"settings.microgrid.{param_name}: constraints must be a list")
+                continue
+
+            if param_name in PARAMETER_REGISTRY:
+                registry_type = PARAMETER_REGISTRY[param_name]['type']
+                if registry_type == "categorical":
+                    if not any('values' in c for c in constraints):
+                        errors.append(
+                            f"settings.microgrid.{param_name}: "
+                            f"categorical param needs 'values' in constraints"
+                        )
+                elif registry_type in ["int", "float"]:
+                    if not any('step' in c and 'lower' in c and 'upper' in c for c in constraints):
+                        errors.append(
+                            f"settings.microgrid.{param_name}: "
+                            f"{registry_type} param needs step/lower/upper in constraints"
+                        )
+
+        if errors:
+            error_msg = "Preflight validation failed:\n" + "\n".join(f"  - {err}" for err in errors)
+            return {
+                "result": "FAILURE",
+                "error": error_msg
+            }
+
+        result = {
+            "result": "SUCCESS",
+            "data": {
+                "message": "Preflight validation passed"
+            }
+        }
+
+        if warnings:
+            result["data"]["warnings"] = warnings
+
+        return result
+
+    except Exception as e:
+        return {
+            "result": "FAILURE",
+            "error": f"Preflight validation error: {str(e)}"
+        }
