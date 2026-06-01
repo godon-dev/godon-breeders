@@ -181,8 +181,8 @@ class MultiFrequencyMultiParam(Watermark):
         for i, pc in enumerate(param_configs):
             pname = pc['name']
             lo, hi = pc['lower'], pc['upper']
-            mid = (lo + hi) / 2.0
-            amplitude = 0.50 * mid  # 50% of mid-range — strong signal
+            param_range = hi - lo
+            amplitude = 0.25 * param_range  # 25% of range — strong signal
 
             # Rotate periods across params so they don't share same frequencies
             # Each param gets 2 periods, offset by param index
@@ -309,8 +309,8 @@ def create_watermark(config: Dict[str, Any], params_config: Dict[str, Any],
 
     # Fallback: single-param with old behavior
     best = param_candidates[0] if param_candidates else {'name': 'light_intensity', 'lower': 0, 'upper': 1000}
-    mid = (best['lower'] + best['upper']) / 2.0
-    amplitude = 0.50 * mid
+    param_range = best['upper'] - best['lower']
+    amplitude = 0.25 * param_range
     phase_offsets = [random.uniform(0, 2 * math.pi) for _ in periods]
 
     if len(periods) == 1:
