@@ -216,19 +216,21 @@ class MultiFrequencyMultiParam(Watermark):
             pname = wm['name']
             if pname not in base_params:
                 continue
-            base_val = base_params[pname]
+            # Use midpoint as base — ignore sampler's choice for clean watermark signal.
+            # The optimizer still controls non-watermarked parameters freely.
+            lo, hi = self._param_ranges.get(pname, (0, 1000))
+            base_val = (lo + hi) / 2.0
             offset = sum(
                 (wm['amplitude'] / len(wm['periods'])) *
                 math.sin(2 * math.pi * trial_idx / p + po)
                 for p, po in zip(wm['periods'], wm['phase_offsets'])
             )
-            if isinstance(base_val, list):
+            if isinstance(base_params[pname], list):
                 result[pname] = [
-                    self._clamp(v + offset, *self._param_ranges.get(pname, (v * 0.5, v * 1.5)))
-                    for v in base_val
+                    self._clamp(base_val + offset, lo, hi)
+                    for _ in base_params[pname]
                 ]
             else:
-                lo, hi = self._param_ranges.get(pname, (base_val * 0.5, base_val * 1.5))
                 result[pname] = self._clamp(base_val + offset, lo, hi)
         self._trial_count += 1
         return result
