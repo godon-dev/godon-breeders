@@ -155,40 +155,175 @@ class MultiFrequency(Watermark):
         return reduce(lcm, self.periods)
 
 
+class MultiFrequencyMultiParam(Watermark):
+    """Applies multi-frequency sinusoidal watermarks to multiple parameters.
+
+    Each parameter gets its own set of periods (from the breeder's fingerprint),
+    creating multiple independent signal paths from sender to receiver objectives.
+    This gives MIMO-like processing gain: the coupling signal reaches the
+    receiver through multiple parameter channels simultaneously.
+
+    Amplitude per parameter is 50% of that parameter's mid-range.
+    Each param gets a subset of the available periods, rotated so params
+    don't share the same frequencies (reducing interference between channels).
+    """
+
+    def __init__(self, params_config: Dict[str, Any],
+                 param_configs: List[Dict[str, Any]],
+                 periods: List[int],
+                 phase_offsets: Optional[List[float]] = None):
+        super().__init__(params_config)
+        self._param_ranges = self._extract_ranges(params_config)
+        self.periods = periods
+
+        # Each param gets its own amplitude (50% of mid-range)
+        self._param_watermarks = []
+        for i, pc in enumerate(param_configs):
+            pname = pc['name']
+            lo, hi = pc['lower'], pc['upper']
+            mid = (lo + hi) / 2.0
+            amplitude = 0.50 * mid  # 50% of mid-range — strong signal
+
+            # Rotate periods across params so they don't share same frequencies
+            # Each param gets 2 periods, offset by param index
+            param_periods = []
+            for j in range(2):
+                idx = (i * 2 + j) % len(periods)
+                param_periods.append(periods[idx])
+
+            param_phases = [random.uniform(0, 2 * math.pi) for _ in param_periods]
+            self._param_watermarks.append({
+                'name': pname,
+                'amplitude': amplitude,
+                'periods': param_periods,
+                'phase_offsets': param_phases,
+            })
+
+    def _extract_ranges(self, params_config) -> Dict[str, tuple]:
+        ranges = {}
+        settings = params_config.get('greenhouse', params_config.get('microgrid', params_config))
+        for pname, pconfig in settings.items():
+            if not isinstance(pconfig, dict) or 'constraints' not in pconfig:
+                continue
+            for c in pconfig['constraints']:
+                if 'lower' in c and 'upper' in c:
+                    ranges[pname] = (c['lower'], c['upper'])
+        return ranges
+
+    def generate(self, trial_idx: int, base_params: Dict[str, Any]) -> Dict[str, Any]:
+        result = dict(base_params)
+        for wm in self._param_watermarks:
+            pname = wm['name']
+            if pname not in base_params:
+                continue
+            base_val = base_params[pname]
+            offset = sum(
+                (wm['amplitude'] / len(wm['periods'])) *
+                math.sin(2 * math.pi * trial_idx / p + po)
+                for p, po in zip(wm['periods'], wm['phase_offsets'])
+            )
+            if isinstance(base_val, list):
+                result[pname] = [
+                    self._clamp(v + offset, *self._param_ranges.get(pname, (v * 0.5, v * 1.5)))
+                    for v in base_val
+                ]
+            else:
+                lo, hi = self._param_ranges.get(pname, (base_val * 0.5, base_val * 1.5))
+                result[pname] = self._clamp(base_val + offset, lo, hi)
+        self._trial_count += 1
+        return result
+
+    def metadata(self) -> Dict[str, Any]:
+        return {
+            'type': 'multi_frequency_multi_param',
+            'periods': self.periods,
+            'params': [
+                {
+                    'param_name': wm['name'],
+                    'amplitude': round(wm['amplitude'], 4),
+                    'periods': wm['periods'],
+                    'phase_offsets': [round(po, 4) for po in wm['phase_offsets']],
+                }
+                for wm in self._param_watermarks
+            ],
+        }
+
+    def cycle_count(self) -> int:
+        from math import gcd
+        from functools import reduce
+        def lcm(a, b):
+            return a * b // gcd(a, b)
+        # Collect all periods across all params
+        all_periods = set()
+        for wm in self._param_watermarks:
+            all_periods.update(wm['periods'])
+        if not all_periods:
+            return 1
+        return reduce(lcm, all_periods)
+
+
 def create_watermark(config: Dict[str, Any], params_config: Dict[str, Any],
                      override_type: Optional[str] = None, breeder_uuid: Optional[str] = None) -> Optional[Watermark]:
     interference_config = config.get('interference_detection', {})
     if interference_config.get('mode', 'inactive') != 'active':
         return None
 
-    param_name, amplitude = _pick_param_and_amplitude(params_config)
+    # Find all params with ranges, sorted by range size (largest first)
+    param_candidates = []
+    settings = params_config.get('greenhouse', params_config.get('microgrid', params_config))
+    for pname, pconfig in settings.items():
+        if not isinstance(pconfig, dict) or 'constraints' not in pconfig:
+            continue
+        for c in pconfig['constraints']:
+            if 'lower' in c and 'upper' in c:
+                param_candidates.append({
+                    'name': pname,
+                    'lower': c['lower'],
+                    'upper': c['upper'],
+                    'range': c['upper'] - c['lower'],
+                })
+    param_candidates.sort(key=lambda x: x['range'], reverse=True)
 
+    # Select breeder fingerprint periods
     period_candidates = [17, 23, 29, 37]
     if breeder_uuid:
-        # Use UUID hash to select 2-3 unique periods as breeder fingerprint
         h = int(hashlib.md5(breeder_uuid.encode()).hexdigest(), 16)
         n_freqs = 2 + (h % 2)  # 2 or 3 frequencies
         indices = [(h >> (i * 3)) % len(period_candidates) for i in range(n_freqs)]
-        periods = list(dict.fromkeys(period_candidates[i] for i in indices))  # unique, ordered
+        periods = list(dict.fromkeys(period_candidates[i] for i in indices))
         if len(periods) < 2:
             periods = period_candidates[:2]
     else:
         period = max(10, min(interference_config.get('phase_trials', 20), 40))
         periods = [period]
 
+    # Use multi-param watermark if we have 2+ params, otherwise single-param
+    if len(param_candidates) >= 2:
+        # Take top 3 params (or fewer if not enough)
+        selected = param_candidates[:min(3, len(param_candidates))]
+        return MultiFrequencyMultiParam(
+            params_config=params_config,
+            param_configs=selected,
+            periods=periods,
+        )
+
+    # Fallback: single-param with old behavior
+    best = param_candidates[0] if param_candidates else {'name': 'light_intensity', 'lower': 0, 'upper': 1000}
+    mid = (best['lower'] + best['upper']) / 2.0
+    amplitude = 0.50 * mid
     phase_offsets = [random.uniform(0, 2 * math.pi) for _ in periods]
 
     if len(periods) == 1:
         return Sinusoidal(
             params_config=params_config,
-            param_name=param_name,
+            param_name=best['name'],
             amplitude=amplitude,
             period=periods[0],
             phase_offset=phase_offsets[0],
         )
     return MultiFrequency(
         params_config=params_config,
-        param_name=param_name,
+        param_name=best['name'],
         total_amplitude=amplitude,
         periods=periods,
         phase_offsets=phase_offsets,
