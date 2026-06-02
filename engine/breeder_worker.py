@@ -130,6 +130,7 @@ class BreederWorker:
             if self.watermark:
                 logger.info(f"Watermarking enabled: {self.watermark.metadata()}")
         self._watermark_trial_idx = 0
+        self._wm_corrected_params = None
         self._watermark_baseline = self._compute_baseline_params(settings)
 
         self._update_state()
@@ -859,16 +860,13 @@ class BreederWorker:
                             wm_params = self.watermark.generate(self._watermark_trial_idx, params)
                             if wm_params:
                                 params = wm_params
-                                # Tell Optuna the actual values we're using for watermarked params
-                                # so the sampler learns from real data, not the sampler's original guess.
-                                # _suggest is Optuna's internal method to record a parameter value.
-                                # Wrapped in try/except — watermark must not break if Optuna update fails.
-                                for pname, pval in wm_params.items():
-                                    if pname in trial.params and trial.params[pname] != pval:
-                                        try:
-                                            trial._suggest(trial.distributions[pname], pval)
-                                        except Exception as e:
-                                            logger.warning(f"Failed to update Optuna param {pname}: {e}")
+                                # Store corrected params for Optuna — we'll inject them via
+                                # study.add_trial() after study.tell() to avoid the sampler's
+                                # original values being recorded for watermarked params.
+                                self._wm_corrected_params = {
+                                    pname: pval for pname, pval in wm_params.items()
+                                    if pname in trial.params and trial.params[pname] != pval
+                                }
                                 trial.set_user_attr('watermark', json.dumps(self.watermark.metadata()))
                                 trial.set_user_attr('watermark_trial_idx', self._watermark_trial_idx)
                             else:
@@ -928,6 +926,27 @@ class BreederWorker:
                             lambda: self.study.tell(trial, values),
                             f"study.tell (trial {trial.number})"
                         )
+
+                        # If watermarking was active, inject corrected params into Optuna.
+                        # The original trial has the sampler's values for watermarked params.
+                        # We add a corrected trial with the actual values so the sampler
+                        # learns the true relationship.
+                        corrected = getattr(self, '_wm_corrected_params', None)
+                        if corrected:
+                            try:
+                                from optuna.trial import create_trial
+                                all_params = dict(trial.params)
+                                all_params.update(corrected)
+                                corrected_trial = create_trial(
+                                    params=all_params,
+                                    distributions=dict(trial.distributions),
+                                    values=values,
+                                )
+                                self.study.add_trial(corrected_trial)
+                                logger.info(f"Injected corrected trial with watermark params")
+                            except Exception as e:
+                                logger.warning(f"Failed to inject corrected trial: {e}")
+                            self._wm_corrected_params = None
 
                         trial_duration = time.time() - trial_start_time
 
