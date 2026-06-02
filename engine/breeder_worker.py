@@ -861,9 +861,10 @@ class BreederWorker:
                                 params = wm_params
                                 # Tell Optuna the actual values we're using for watermarked params
                                 # so the sampler learns from real data, not the sampler's original guess.
+                                # _suggest is Optuna's internal method to record a parameter value.
                                 for pname, pval in wm_params.items():
                                     if pname in trial.params and trial.params[pname] != pval:
-                                        trial.set_param(pname, pval, distribute_if_needed=True)
+                                        trial._suggest(trial.distributions[pname], pval)
                                 trial.set_user_attr('watermark', json.dumps(self.watermark.metadata()))
                                 trial.set_user_attr('watermark_trial_idx', self._watermark_trial_idx)
                             else:
