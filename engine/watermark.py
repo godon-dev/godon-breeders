@@ -286,15 +286,19 @@ def create_watermark(config: Dict[str, Any], params_config: Dict[str, Any],
                 })
     param_candidates.sort(key=lambda x: x['range'], reverse=True)
 
-    # Select breeder fingerprint periods
-    period_candidates = [17, 23, 29, 37]
+    # Select breeder fingerprint periods — non-overlapping across breeders.
+    # Each breeder gets a unique slice of the prime pool so no two breeders
+    # share any frequency.  This eliminates cross-contamination where
+    # self-subtraction residuals at shared periods cause false positives.
+    period_candidates = [17, 23, 29, 37, 41, 43, 47, 53, 59, 61, 67, 71]
     if breeder_uuid:
         h = int(hashlib.md5(breeder_uuid.encode()).hexdigest(), 16)
-        n_freqs = 2 + (h % 2)  # 2 or 3 frequencies
-        indices = [(h >> (i * 3)) % len(period_candidates) for i in range(n_freqs)]
-        periods = list(dict.fromkeys(period_candidates[i] for i in indices))
-        if len(periods) < 2:
-            periods = period_candidates[:2]
+        freqs_per_breeder = 2
+        # Use hash to pick a starting slot, then take consecutive primes
+        # Each breeder gets a unique block — no overlap possible
+        max_slots = len(period_candidates) // freqs_per_breeder
+        slot = h % max_slots
+        periods = period_candidates[slot * freqs_per_breeder : (slot + 1) * freqs_per_breeder]
     else:
         period = max(10, min(interference_config.get('phase_trials', 20), 40))
         periods = [period]
