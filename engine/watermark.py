@@ -291,17 +291,23 @@ def create_watermark(config: Dict[str, Any], params_config: Dict[str, Any],
     # share any frequency.  This eliminates cross-contamination where
     # self-subtraction residuals at shared periods cause false positives.
     period_candidates = [17, 23, 29, 37, 41, 43, 47, 53, 59, 61, 67, 71]
-    if breeder_uuid:
-        h = int(hashlib.md5(breeder_uuid.encode()).hexdigest(), 16)
-        freqs_per_breeder = 2
-        # Use hash to pick a starting slot, then take consecutive primes
-        # Each breeder gets a unique block — no overlap possible
-        max_slots = len(period_candidates) // freqs_per_breeder
-        slot = h % max_slots
-        periods = period_candidates[slot * freqs_per_breeder : (slot + 1) * freqs_per_breeder]
-    else:
-        period = max(10, min(interference_config.get('phase_trials', 20), 40))
-        periods = [period]
+    freqs_per_breeder = 2
+    max_slots = len(period_candidates) // freqs_per_breeder
+
+    # Slot assignment from controller (collision-free). Required.
+    breeder_section = config.get('breeder', {})
+    explicit_slot = breeder_section.get('watermark_slot')
+    if explicit_slot is None:
+        raise ValueError(
+            "No watermark_slot assigned. The controller must assign a collision-free "
+            "slot when creating the breeder. Cannot continue without one."
+        )
+    if not (0 <= explicit_slot < max_slots):
+        raise ValueError(
+            f"Invalid watermark_slot {explicit_slot}. Must be 0-{max_slots - 1}."
+        )
+    periods = period_candidates[explicit_slot * freqs_per_breeder : (explicit_slot + 1) * freqs_per_breeder]
+    logger.info(f"Using assigned watermark slot {explicit_slot}, periods={periods}")
 
     # Use multi-param watermark if we have 2+ params, otherwise single-param
     if len(param_candidates) >= 2:
