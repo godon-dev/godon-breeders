@@ -920,6 +920,9 @@ class BreederWorker:
                         self.metrics.inc_effectuation('failure')
                     else:
                         values = [metrics.get(obj.get('name')) for obj in self.config.get('objectives', [])]
+                        logger.info(f"Trial {trial.number} metrics: {metrics}, resolved values: {values}")
+                        if any(v is None for v in values):
+                            logger.warning(f"Trial {trial.number} has None values for objectives: {[obj.get('name') for obj, v in zip(self.config.get('objectives', []), values) if v is None]}")
                         if self._last_metric_noise:
                             trial.set_user_attr('metric_noise', json.dumps(self._last_metric_noise))
                         self._retry_op(
@@ -978,6 +981,10 @@ class BreederWorker:
 
                 except Exception as e:
                     logger.error(f"Trial {trial.number} failed: {e}", exc_info=True)
+                    try:
+                        trial.set_user_attr('error', f"{type(e).__name__}: {str(e)[:500]}")
+                    except Exception:
+                        pass
                     try:
                         self._retry_op(
                             lambda: self.study.tell(trial, state=TrialState.FAIL),
