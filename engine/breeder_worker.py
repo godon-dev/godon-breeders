@@ -860,13 +860,6 @@ class BreederWorker:
                             wm_params = self.watermark.generate(self._watermark_trial_idx, params)
                             if wm_params:
                                 params = wm_params
-                                # Restore int types for params that the sampler suggested as int.
-                                # Watermark offsets are floats and corrupt int params (e.g. sim_steps).
-                                import optuna.distributions as _od
-                                for _dname, _dist in trial.distributions.items():
-                                    if isinstance(_dist, _od.IntDistribution):
-                                        if _dname in params and isinstance(params[_dname], float):
-                                            params[_dname] = int(round(params[_dname]))
                                 # Store corrected params for Optuna — we'll inject them via
                                 # study.add_trial() after study.tell() to avoid the sampler's
                                 # original values being recorded for watermarked params.

@@ -11,6 +11,7 @@ class Watermark:
     def __init__(self, params_config: Dict[str, Any]):
         self.params_config = params_config
         self._trial_count = 0
+        self._int_params: set = set()
 
     def generate(self, trial_idx: int, base_params: Dict[str, Any]) -> Dict[str, Any]:
         raise NotImplementedError
@@ -29,6 +30,16 @@ class Watermark:
 
     def _clamp(self, value, lower, upper):
         return max(lower, min(upper, value))
+
+    def _coerce(self, pname: str, value):
+        """Round float watermarks back to int for integer-range params.
+
+        Sinusoidal offsets are always float.  Params whose config bounds are
+        both int (e.g. sim_steps: 10..200) should stay int after watermarking.
+        """
+        if pname in self._int_params and isinstance(value, float):
+            return int(round(value))
+        return value
 
 
 class Sinusoidal(Watermark):
@@ -50,6 +61,8 @@ class Sinusoidal(Watermark):
             for c in pconfig['constraints']:
                 if 'lower' in c and 'upper' in c:
                     ranges[pname] = (c['lower'], c['upper'])
+                    if isinstance(c['lower'], int) and isinstance(c['upper'], int):
+                        self._int_params.add(pname)
         return ranges
 
     def generate(self, trial_idx: int, base_params: Dict[str, Any]) -> Dict[str, Any]:
@@ -59,12 +72,12 @@ class Sinusoidal(Watermark):
             offset = self.amplitude * math.sin(2 * math.pi * trial_idx / self.period + self.phase_offset)
             if isinstance(base_val, list):
                 result[self.param_name] = [
-                    self._clamp(v + offset, *self._param_ranges.get(self.param_name, (v * 0.5, v * 1.5)))
+                    self._coerce(self.param_name, self._clamp(v + offset, *self._param_ranges.get(self.param_name, (v * 0.5, v * 1.5))))
                     for v in base_val
                 ]
             else:
                 lo, hi = self._param_ranges.get(self.param_name, (base_val * 0.5, base_val * 1.5))
-                result[self.param_name] = self._clamp(base_val + offset, lo, hi)
+                result[self.param_name] = self._coerce(self.param_name, self._clamp(base_val + offset, lo, hi))
         self._trial_count += 1
         return result
 
@@ -115,6 +128,8 @@ class MultiFrequency(Watermark):
             for c in pconfig['constraints']:
                 if 'lower' in c and 'upper' in c:
                     ranges[pname] = (c['lower'], c['upper'])
+                    if isinstance(c['lower'], int) and isinstance(c['upper'], int):
+                        self._int_params.add(pname)
         return ranges
 
     def generate(self, trial_idx: int, base_params: Dict[str, Any]) -> Dict[str, Any]:
@@ -127,12 +142,12 @@ class MultiFrequency(Watermark):
             )
             if isinstance(base_val, list):
                 result[self.param_name] = [
-                    self._clamp(v + offset, *self._param_ranges.get(self.param_name, (v * 0.5, v * 1.5)))
+                    self._coerce(self.param_name, self._clamp(v + offset, *self._param_ranges.get(self.param_name, (v * 0.5, v * 1.5))))
                     for v in base_val
                 ]
             else:
                 lo, hi = self._param_ranges.get(self.param_name, (base_val * 0.5, base_val * 1.5))
-                result[self.param_name] = self._clamp(base_val + offset, lo, hi)
+                result[self.param_name] = self._coerce(self.param_name, self._clamp(base_val + offset, lo, hi))
         self._trial_count += 1
         return result
 
@@ -208,6 +223,8 @@ class MultiFrequencyMultiParam(Watermark):
             for c in pconfig['constraints']:
                 if 'lower' in c and 'upper' in c:
                     ranges[pname] = (c['lower'], c['upper'])
+                    if isinstance(c['lower'], int) and isinstance(c['upper'], int):
+                        self._int_params.add(pname)
         return ranges
 
     def generate(self, trial_idx: int, base_params: Dict[str, Any]) -> Dict[str, Any]:
@@ -227,11 +244,11 @@ class MultiFrequencyMultiParam(Watermark):
             )
             if isinstance(base_params[pname], list):
                 result[pname] = [
-                    self._clamp(base_val + offset, lo, hi)
+                    self._coerce(pname, self._clamp(base_val + offset, lo, hi))
                     for _ in base_params[pname]
                 ]
             else:
-                result[pname] = self._clamp(base_val + offset, lo, hi)
+                result[pname] = self._coerce(pname, self._clamp(base_val + offset, lo, hi))
         self._trial_count += 1
         return result
 
