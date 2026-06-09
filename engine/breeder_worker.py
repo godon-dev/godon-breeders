@@ -858,6 +858,8 @@ class BreederWorker:
                         wm_complete = hasattr(self.watermark, 'is_complete') and self.watermark.is_complete()
                         if not wm_complete:
                             wm_params = self.watermark.generate(self._watermark_trial_idx, params)
+                            # Determine if this is an active impulse trial
+                            is_impulse = hasattr(self.watermark, 'is_impulse_trial') and self.watermark.is_impulse_trial(self._watermark_trial_idx)
                             if wm_params:
                                 params = wm_params
                                 # Store corrected params for Optuna — we'll inject them via
@@ -867,13 +869,16 @@ class BreederWorker:
                                     pname: pval for pname, pval in wm_params.items()
                                     if pname in trial.params and trial.params[pname] != pval
                                 }
-                                trial.set_user_attr('watermark', json.dumps(self.watermark.metadata()))
+                                wm_meta = self.watermark.metadata()
+                                if is_impulse:
+                                    wm_meta['active'] = True
+                                trial.set_user_attr('watermark', json.dumps(wm_meta))
                                 trial.set_user_attr('watermark_trial_idx', self._watermark_trial_idx)
                             else:
                                 trial.set_user_attr('watermark', 'off')
                                 trial.set_user_attr('watermark_trial_idx', self._watermark_trial_idx)
                             self._watermark_trial_idx += 1
-                            logger.info(f"Watermark trial {self._watermark_trial_idx}: {'on' if wm_params else 'off'}")
+                            logger.info(f"Watermark trial {self._watermark_trial_idx}: impulse={'ON' if is_impulse else 'off'}")
 
                     if params:
                         metrics = self._execute_trial(params)
