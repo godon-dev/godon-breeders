@@ -122,6 +122,7 @@ class BreederWorker:
         self._last_metric_noise = {}
 
         self._register_interference_breeder()
+        self._ensure_detection_rounds_table()
 
         settings = config.get('settings', {})
         self.watermark = None
@@ -343,6 +344,93 @@ class BreederWorker:
             return self._with_shared_db(op, "has_active_neighbors")
         except Exception:
             return False
+
+    def _ensure_detection_rounds_table(self):
+        def op(conn):
+            cur = conn.cursor()
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS detection_rounds (
+                    round_id    SERIAL PRIMARY KEY,
+                    sender_id   VARCHAR(255) NOT NULL,
+                    status      TEXT NOT NULL DEFAULT 'active',
+                    created_at  TIMESTAMPTZ DEFAULT NOW(),
+                    completed_at TIMESTAMPTZ
+                )
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_detection_rounds_active 
+                ON detection_rounds (status) WHERE status = 'active'
+            """)
+            cur.close()
+        try:
+            self._with_shared_db(op, "ensure_detection_rounds_table")
+        except Exception as e:
+            logger.warning(f"Failed to create detection_rounds table: {e}")
+
+    def _get_detection_mode(self) -> str:
+        """Check detection_rounds table and return mode for this breeder.
+        
+        Returns: 'optimize' | 'hold' | 'impulse'
+        """
+        def op(conn):
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT sender_id FROM detection_rounds WHERE status = 'active' LIMIT 1"
+            )
+            row = cur.fetchone()
+            cur.close()
+            if row is None:
+                return 'optimize'
+            sender_id = row[0]
+            if sender_id == self.breeder_id:
+                return 'impulse'
+            return 'hold'
+        try:
+            return self._with_shared_db(op, "get_detection_mode")
+        except Exception as e:
+            logger.warning(f"Failed to read detection mode: {e}")
+            return 'optimize'
+
+    def _complete_detection_round(self):
+        """Mark the current active round as completed after impulse."""
+        def op(conn):
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE detection_rounds SET status = 'completed', completed_at = NOW() "
+                "WHERE sender_id = %s AND status = 'active'",
+                (self.breeder_id,)
+            )
+            cur.close()
+        try:
+            self._with_shared_db(op, "complete_detection_round")
+            logger.info("Detection round completed")
+        except Exception as e:
+            logger.warning(f"Failed to complete detection round: {e}")
+
+    def _get_last_successful_params(self) -> Optional[Dict[str, Any]]:
+        """Get params from the last completed trial for hold mode."""
+        for trial in reversed(self.study.trials):
+            if trial.state == TrialState.COMPLETE:
+                return dict(trial.params)
+        return None
+
+    def _generate_impulse_params(self, settings: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Generate params pushed to upper bounds for impulse mode."""
+        params = {}
+        count = 0
+        for key, spec in settings.items():
+            constraints = spec.get('constraints', [])
+            if not constraints:
+                continue
+            upper = constraints[0].get('upper')
+            if upper is None:
+                continue
+            is_int = constraints[0].get('step', 1) == int(constraints[0].get('step', 1))
+            params[key] = int(upper) if is_int else upper
+            count += 1
+            if count >= 3:
+                break
+        return params if params else None
 
     def _load_or_create_study(self) -> optuna.Study:
         parallel_workers = self.config.get('run', {}).get('parallel', 1)
@@ -847,7 +935,24 @@ class BreederWorker:
                 params = None
 
                 try:
-                    params = self.strain.suggest_params(trial, self.config.get('settings', {}))
+                    # Check detection mode — overrides normal sampling
+                    detection_mode = self._get_detection_mode()
+                    
+                    if detection_mode == 'hold':
+                        logger.info(f"Trial {trial.number}: DETECTION HOLD mode")
+                        params = self._get_last_successful_params()
+                        trial.set_user_attr('detection_mode', 'hold')
+                        if not params:
+                            logger.warning("No successful trial to hold, using baseline")
+                            params = self._watermark_baseline
+
+                    elif detection_mode == 'impulse':
+                        logger.info(f"Trial {trial.number}: DETECTION IMPULSE mode")
+                        params = self._generate_impulse_params(self.config.get('settings', {}))
+                        trial.set_user_attr('detection_mode', 'impulse')
+
+                    else:
+                        params = self.strain.suggest_params(trial, self.config.get('settings', {}))
 
                     if not self.watermark and self._has_active_neighbors():
                         self.watermark = create_watermark(self.config, self.config.get('settings', {}), breeder_uuid=self.breeder_uuid)
@@ -968,6 +1073,10 @@ class BreederWorker:
                             self.metrics.set_best_value(values[0] if values else 0)
 
                         self._handle_successful_trial(params)
+
+                        # Complete detection round if this was an impulse
+                        if detection_mode == 'impulse':
+                            self._complete_detection_round()
 
                         if self.communication_callback:
                             frozen_trial = self.study.trials[-1]
