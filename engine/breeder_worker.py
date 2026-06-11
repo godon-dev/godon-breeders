@@ -122,7 +122,6 @@ class BreederWorker:
         self._last_metric_noise = {}
 
         self._register_interference_breeder()
-        self._ensure_detection_rounds_table()
 
         settings = config.get('settings', {})
         self.watermark = None
@@ -344,28 +343,6 @@ class BreederWorker:
             return self._with_shared_db(op, "has_active_neighbors")
         except Exception:
             return False
-
-    def _ensure_detection_rounds_table(self):
-        def op(conn):
-            cur = conn.cursor()
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS detection_rounds (
-                    round_id    SERIAL PRIMARY KEY,
-                    sender_id   VARCHAR(255) NOT NULL,
-                    status      TEXT NOT NULL DEFAULT 'active',
-                    created_at  TIMESTAMPTZ DEFAULT NOW(),
-                    completed_at TIMESTAMPTZ
-                )
-            """)
-            cur.execute("""
-                CREATE INDEX IF NOT EXISTS idx_detection_rounds_active 
-                ON detection_rounds (status) WHERE status = 'active'
-            """)
-            cur.close()
-        try:
-            self._with_shared_db(op, "ensure_detection_rounds_table")
-        except Exception as e:
-            logger.warning(f"Failed to create detection_rounds table: {e}")
 
     def _get_detection_mode(self) -> str:
         """Check detection_rounds table and return mode for this breeder.
