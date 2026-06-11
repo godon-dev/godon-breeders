@@ -54,6 +54,7 @@ def _greenhouse_config():
 def _make_worker(config=None):
     config = config or _greenhouse_config()
     study = MagicMock()
+    study.trials = []
     with patch.object(BreederWorker, '_load_or_create_study', return_value=study), \
          patch.object(BreederWorker, '_setup_communication', return_value=None), \
          patch.object(BreederWorker, '_update_state'), \
