@@ -50,11 +50,14 @@ def _greenhouse_config():
 
 def _make_worker(config=None):
     config = config or _greenhouse_config()
-    with patch('engine.breeder_worker.OptunaStrain'), \
-         patch('engine.breeder_worker.create_watermark', return_value=None), \
-         patch('engine.breeder_worker.MetricsPusher'):
-        worker = BreederWorker(config, breeder_id='test-uuid')
-    worker.study = MagicMock()
+    study = MagicMock()
+    with patch.object(BreederWorker, '_load_or_create_study', return_value=study), \
+         patch.object(BreederWorker, '_setup_communication', return_value=None), \
+         patch.object(BreederWorker, '_update_state'), \
+         patch.object(BreederWorker, '_register_interference_breeder'), \
+         patch('engine.breeder_worker.load_strain', return_value=MagicMock()):
+        worker = BreederWorker(config)
+    worker.study = study
     return worker
 
 
