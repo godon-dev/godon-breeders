@@ -265,7 +265,11 @@ class BreederWorker:
 
     def _get_shared_db_url(self) -> str:
         import os
-        return f"postgresql://{os.environ.get('GODON_ARCHIVE_DB_USER', 'postgres')}:{os.environ.get('GODON_ARCHIVE_DB_PASSWORD', 'postgres')}@{os.environ.get('GODON_ARCHIVE_DB_SERVICE_HOST', 'localhost')}:{os.environ.get('GODON_ARCHIVE_DB_SERVICE_PORT', '5432')}/archive_db"
+        pw = os.environ.get('GODON_ARCHIVE_DB_PASSWORD', 'postgres')
+        user = os.environ.get('GODON_ARCHIVE_DB_USER', 'postgres')
+        host = os.environ.get('GODON_ARCHIVE_DB_SERVICE_HOST', 'localhost')
+        port = os.environ.get('GODON_ARCHIVE_DB_SERVICE_PORT', '5432')
+        return f"postgresql://{user}:{pw}@{host}:{port}/archive_db"
 
     def _with_shared_db(self, fn, description: str, max_retries: int = 4):
         last_error = None
