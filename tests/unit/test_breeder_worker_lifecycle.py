@@ -422,6 +422,7 @@ class TestRunLoop:
 
         with patch.object(worker, '_execute_trial', return_value={'throughput': 42.5}), \
              patch.object(worker, '_check_guardrails', return_value=(False, [])), \
+             patch.object(worker, '_get_detection_mode', return_value='optimize'), \
              patch.object(worker, 'metrics'):
             worker.run()
 
