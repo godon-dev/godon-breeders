@@ -73,6 +73,11 @@ class TestHoldParamsFormat:
         trial = _make_trial(user_attrs={'effectuation_params': json.dumps(nested)})
         worker = _make_worker_with_trials([trial])
 
+        # Debug
+        print(f"study type: {type(worker.study)}")
+        print(f"trials type: {type(worker.study.trials)}")
+        print(f"trials len: {len(worker.study.trials)}")
+
         result = worker._get_last_successful_params()
         assert result == nested
 
