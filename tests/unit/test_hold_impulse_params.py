@@ -33,7 +33,8 @@ from engine.breeder_worker import BreederWorker
 
 def _greenhouse_config():
     return {
-        'breeder': {'type': 'bench_greenhouse', 'uuid': 'test-uuid'},
+        'breeder': {'type': 'bench_greenhouse', 'uuid': 'test-uuid', 'name': 'test_breeder'},
+        'creation_ts': '2025-01-15T10:30:00Z',
         'settings': {
             'greenhouse': {
                 'zones': 2,
@@ -44,6 +45,8 @@ def _greenhouse_config():
         },
         'effectuation': {'type': 'http', 'targets': []},
         'run': {'parallel': 1},
+        'objectives': [{'name': 'growth_rate', 'direction': 'maximize'}],
+        'reconnaissance': {'type': 'prometheus'},
         'interference_detection': {'mode': 'active'},
     }
 
