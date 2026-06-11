@@ -985,6 +985,24 @@ class BreederWorker:
                     elif detection_mode == 'impulse':
                         logger.info(f"Trial {trial.number}: DETECTION IMPULSE mode")
                         params = self._generate_impulse_params(self.config.get('settings', {}))
+                        if not params:
+                            # No prior trial to use as template — suggest fresh params
+                            # via the strain, then override top-3 to upper bounds
+                            logger.warning("No prior trial for impulse template, suggesting fresh params")
+                            base_params = self.strain.suggest_params(trial, self.config.get('settings', {}))
+                            upper_bounds = self._collect_upper_bounds(self.config.get('settings', {}))
+                            upper_bounds.sort(key=lambda x: x.get('range', 0), reverse=True)
+                            for ub in upper_bounds[:3]:
+                                name = ub['name']
+                                value = ub['upper']
+                                if ub.get('is_int'):
+                                    value = int(value)
+                                if name in base_params:
+                                    if isinstance(base_params[name], list):
+                                        base_params[name] = [value] * len(base_params[name])
+                                    else:
+                                        base_params[name] = value
+                            params = base_params
                         trial.set_user_attr('detection_mode', 'impulse')
 
                     else:
