@@ -77,6 +77,13 @@ class TestHoldParamsFormat:
         print(f"study type: {type(worker.study)}")
         print(f"trials type: {type(worker.study.trials)}")
         print(f"trials len: {len(worker.study.trials)}")
+        if worker.study.trials:
+            t = worker.study.trials[0]
+            print(f"trial.state={t.state}, type={type(t.state)}")
+            print(f"COMPLETE={TrialState.COMPLETE}, type={type(TrialState.COMPLETE)}")
+            print(f"match={t.state == TrialState.COMPLETE}")
+            print(f"user_attrs={t.user_attrs}")
+            print(f"get result={t.user_attrs.get('effectuation_params')}")
 
         result = worker._get_last_successful_params()
         assert result == nested
