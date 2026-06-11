@@ -389,29 +389,84 @@ class BreederWorker:
             logger.warning(f"Failed to complete detection round: {e}")
 
     def _get_last_successful_params(self) -> Optional[Dict[str, Any]]:
-        """Get params from the last completed trial for hold mode."""
+        """Get effectuation-format params from the last completed trial for hold mode.
+
+        Reads the stashed effectuation_params user_attr which preserves the format
+        that suggest_params returned and the effectuator expects.
+        Falls back to flat trial.params if no stashed attr found.
+        """
         for trial in reversed(self.study.trials):
             if trial.state == TrialState.COMPLETE:
+                stashed = trial.user_attrs.get('effectuation_params')
+                if stashed:
+                    return json.loads(stashed) if isinstance(stashed, str) else stashed
                 return dict(trial.params)
         return None
 
     def _generate_impulse_params(self, settings: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Generate params pushed to upper bounds for impulse mode."""
-        params = {}
-        count = 0
-        for key, spec in settings.items():
-            constraints = spec.get('constraints', [])
-            if not constraints:
-                continue
-            upper = constraints[0].get('upper')
-            if upper is None:
-                continue
-            is_int = constraints[0].get('step', 1) == int(constraints[0].get('step', 1))
-            params[key] = int(upper) if is_int else upper
-            count += 1
-            if count >= 3:
+        """Generate params pushed to upper bounds for impulse mode.
+
+        Takes the last strain-formatted params as template (correct structure,
+        per-zone lists, etc), then overrides the top-3 params by range to
+        their upper bounds from the config constraints.
+        """
+        if not self.study or not self.study.trials:
+            return None
+
+        # Get the last strain-formatted params as template
+        stashed = None
+        for trial in reversed(self.study.trials):
+            if trial.state == TrialState.COMPLETE:
+                stashed = trial.user_attrs.get('effectuation_params')
                 break
+
+        if not stashed:
+            return None
+
+        params = json.loads(stashed) if isinstance(stashed, str) else dict(stashed)
+
+        # Collect upper bounds from config and override top-3 by range
+        upper_bounds = self._collect_upper_bounds(settings)
+        upper_bounds.sort(key=lambda x: x.get('range', 0), reverse=True)
+
+        for ub in upper_bounds[:3]:
+            name = ub['name']
+            value = ub['upper']
+            if ub.get('is_int'):
+                value = int(value)
+            if name in params:
+                if isinstance(params[name], list):
+                    params[name] = [value] * len(params[name])
+                else:
+                    params[name] = value
+
         return params if params else None
+
+    def _collect_upper_bounds(self, obj: Any, depth: int = 0) -> list:
+        """Recursively walk config tree and collect params with upper bounds."""
+        results = []
+        if not isinstance(obj, dict) or depth > 5:
+            return results
+        for key, val in obj.items():
+            if key == 'zones' or not isinstance(val, dict):
+                continue
+            constraints = val.get('constraints')
+            if isinstance(constraints, list) and constraints:
+                first = constraints[0]
+                lower = first.get('lower')
+                upper = first.get('upper')
+                if upper is not None and lower is not None:
+                    is_int = first.get('step', 1) == int(first.get('step', 1))
+                    results.append({
+                        'name': key,
+                        'upper': upper,
+                        'lower': lower,
+                        'range': upper - lower,
+                        'is_int': is_int,
+                    })
+            else:
+                results.extend(self._collect_upper_bounds(val, depth + 1))
+        return results
 
     def _load_or_create_study(self) -> optuna.Study:
         parallel_workers = self.config.get('run', {}).get('parallel', 1)
@@ -1053,6 +1108,8 @@ class BreederWorker:
                         if self.study.best_trials[0] and self.study.best_trials[0].number == trial.number:
                             self.metrics.set_best_value(values[0] if values else 0)
 
+                        # Stash effectuation-format params for hold mode retrieval
+                        trial.set_user_attr('effectuation_params', json.dumps(params))
                         self._handle_successful_trial(params)
 
                         # Complete detection round if this was an impulse
