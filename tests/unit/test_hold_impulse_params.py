@@ -35,7 +35,8 @@ def _greenhouse_settings():
     }
 
 
-def _make_trial(state=TrialState.COMPLETE, user_attrs=None, flat_params=None):
+def _make_trial(state=1, user_attrs=None, flat_params=None):
+    """Create a mock trial. state defaults to 1 (TrialState.COMPLETE)."""
     trial = MagicMock()
     trial.state = state
     trial.user_attrs = user_attrs or {}
@@ -72,18 +73,6 @@ class TestHoldParamsFormat:
         nested = {'heating_setpoints': [11.0, 13.5], 'co2_injection': 3.5}
         trial = _make_trial(user_attrs={'effectuation_params': json.dumps(nested)})
         worker = _make_worker_with_trials([trial])
-
-        # Debug
-        print(f"study type: {type(worker.study)}")
-        print(f"trials type: {type(worker.study.trials)}")
-        print(f"trials len: {len(worker.study.trials)}")
-        if worker.study.trials:
-            t = worker.study.trials[0]
-            print(f"trial.state={t.state}, type={type(t.state)}")
-            print(f"COMPLETE={TrialState.COMPLETE}, type={type(TrialState.COMPLETE)}")
-            print(f"match={t.state == TrialState.COMPLETE}")
-            print(f"user_attrs={t.user_attrs}")
-            print(f"get result={t.user_attrs.get('effectuation_params')}")
 
         result = worker._get_last_successful_params()
         assert result == nested
