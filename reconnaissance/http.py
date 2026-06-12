@@ -104,9 +104,12 @@ def _gather_single_metric(base_url: str, metric_name: str, recon_config: Dict[st
         return {'value': float('inf'), 'noise_cv': None}
 
     try:
+        import sys
+        sys.stderr.write(f"[DEBUG] Entered _gather_single_metric, service={recon_service}\n")
         path = recon_config.get('path', '')
         key = recon_config.get('key')
         url = f"{base_url.rstrip('/')}{path}"
+        sys.stderr.write(f"[DEBUG] url={url}, key={key}\n")
 
         stabilization_seconds = recon_config.get('stabilization_seconds', 2)
         min_samples = recon_config.get('samples', 1)
