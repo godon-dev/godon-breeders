@@ -163,6 +163,8 @@ def _gather_single_metric(base_url: str, metric_name: str, recon_config: Dict[st
         return {'value': final_value, 'noise_cv': round(noise_cv, 6) if noise_cv != float('inf') else None}
 
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         logger.error(f"Failed to gather metric {metric_name}: {e}")
         return {'value': float('inf'), 'noise_cv': None}
 
