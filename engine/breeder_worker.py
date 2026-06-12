@@ -519,7 +519,7 @@ class BreederWorker:
         return params
 
     def _get_calibrated_hold_params(self) -> Optional[Dict[str, Any]]:
-        """Get calibrated hold params — average of last N successful optimize trials.
+        """Get calibrated hold params — median of last N successful optimize trials.
 
         Uses stashed effectuation_params to get correct format.
         Returns None if not enough trials exist yet.
@@ -546,21 +546,21 @@ class BreederWorker:
             self._calibrated_hold_params = successful[0]
             return self._calibrated_hold_params
 
-        # Average numeric values across the successful trials
+        # Median of numeric values across the successful trials
+        import statistics
         result = dict(successful[0])
         for key in result:
             if isinstance(result[key], list):
                 lists = [s[key] for s in successful if key in s and isinstance(s[key], list)]
                 if lists:
-                    avg = [sum(vals) / len(vals) for vals in zip(*lists)]
-                    result[key] = avg
+                    result[key] = [statistics.median(vals) for vals in zip(*lists)]
             elif isinstance(result[key], (int, float)):
                 vals = [s[key] for s in successful if key in s and isinstance(s[key], (int, float))]
                 if vals:
-                    result[key] = sum(vals) / len(vals)
+                    result[key] = statistics.median(vals)
 
         self._calibrated_hold_params = result
-        logger.info(f"Calibrated hold params from {len(successful)} trials: {list(result.keys())}")
+        logger.info(f"Calibrated hold params from {len(successful)} trials (median): {list(result.keys())}")
         return result
 
     def _impulse_aimd_backoff(self):
