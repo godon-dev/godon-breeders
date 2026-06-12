@@ -1111,18 +1111,20 @@ class BreederWorker:
                     if detection_mode == 'hold' and has_warmup:
                         logger.info(f"Trial {trial.number}: DETECTION HOLD mode")
                         params = self._get_calibrated_hold_params()
-                        trial.set_user_attr('detection_mode', 'hold')
                         if not params:
                             logger.warning("No calibrated hold params yet, optimizing normally")
                             detection_mode = None  # Fall through to optimize
+                        else:
+                            trial.set_user_attr('detection_mode', 'hold')
 
                     elif detection_mode == 'impulse' and has_warmup:
                         logger.info(f"Trial {trial.number}: DETECTION IMPULSE mode")
                         params = self._get_calibrated_impulse_params()
-                        trial.set_user_attr('detection_mode', 'impulse')
                         if not params:
                             logger.warning("No calibrated impulse params yet, optimizing normally")
                             detection_mode = None  # Fall through to optimize
+                        else:
+                            trial.set_user_attr('detection_mode', 'impulse')
 
                     if not params:
                         params = self.strain.suggest_params(trial, self.config.get('settings', {}))
