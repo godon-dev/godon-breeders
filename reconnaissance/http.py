@@ -107,7 +107,34 @@ def _gather_single_metric(base_url: str, metric_name: str, recon_config: Dict[st
         path = recon_config.get('path', '')
         key = recon_config.get('key')
         url = f"{base_url.rstrip('/')}{path}"
-        raise RuntimeError(f"[DEBUG-PROBE] service={recon_service} key={key} url={url}")
+
+        stabilization_seconds = recon_config.get('stabilization_seconds', 2)
+        min_samples = recon_config.get('samples', 1)
+        max_samples = recon_config.get('max_samples', min_samples)
+        interval = recon_config.get('interval', 0)
+        timeout = recon_config.get('timeout_seconds', 30)
+        cv_threshold = recon_config.get('cv_threshold', 0.05)
+
+        if stabilization_seconds > 0:
+            time.sleep(stabilization_seconds)
+
+        sample_values = []
+
+        def _take_sample(idx):
+            data = _http_get_with_retry(url, timeout=timeout)
+            if key not in data:
+                return None
+            value = data[key]
+            if value is not None:
+                value = float(value)
+            return value
+
+        for i in range(min_samples):
+            sample_values.append(_take_sample(i))
+            if i < min_samples - 1 and interval > 0:
+                time.sleep(interval)
+
+        raise RuntimeError(f"[DEBUG-PROBE] samples={sample_values} len={len(sample_values)}")
 
         stabilization_seconds = recon_config.get('stabilization_seconds', 2)
         min_samples = recon_config.get('samples', 1)
