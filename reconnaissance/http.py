@@ -125,14 +125,14 @@ def _gather_single_metric(base_url: str, metric_name: str, recon_config: Dict[st
 
         def _take_sample(idx):
             data = _http_get_with_retry(url, timeout=timeout)
-            logger.info(f"[DEBUG] _take_sample data={data} type={type(data)} key={key}")
+            print(f"[DEBUG] _take_sample data={data} type={type(data)} key={key}")
             if key not in data:
                 logger.warning(f"Key '{key}' not found in response. Available keys: {list(data.keys())}")
                 return None
             value = data[key]
             if value is not None:
                 value = float(value)
-            logger.info(f"[DEBUG] _take_sample value={value}")
+            print(f"[DEBUG] _take_sample value={value}")
             return value
 
         for i in range(min_samples):
