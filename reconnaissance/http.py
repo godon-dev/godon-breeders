@@ -151,7 +151,6 @@ def _gather_single_metric(base_url: str, metric_name: str, recon_config: Dict[st
                 time.sleep(interval)
 
         aggregation_method = recon_config.get('aggregation', 'median')
-        raise RuntimeError(f"[DEBUG-PROBE] samples={sample_values} agg={aggregation_method}")
         final_value = _aggregate_samples(sample_values, aggregation_method)
         noise_cv = _compute_cv(sample_values)
 
