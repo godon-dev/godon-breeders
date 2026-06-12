@@ -1250,15 +1250,18 @@ class BreederWorker:
                         self.metrics.observe_trial_duration(trial_duration)
                         self.metrics.inc_effectuation('success')
 
+                        # Diagnostic: mark trial as reached success path
+                        trial.set_user_attr('success_path', 'reached')
+
                         if self.study.best_trials and self.study.best_trials[0].number == trial.number:
                             self.metrics.set_best_value(values[0] if values else 0)
 
                         # Stash effectuation-format params for hold mode retrieval
                         try:
                             trial.set_user_attr('effectuation_params', json.dumps(params))
-                            logger.info(f"Stashed effectuation_params for trial {trial.number}")
+                            trial.set_user_attr('stash_status', 'ok')
                         except Exception as stash_err:
-                            logger.warning(f"Failed to stash effectuation_params: {stash_err}")
+                            trial.set_user_attr('stash_status', f'fail:{stash_err}')
                         self._handle_successful_trial(params)
 
                         # Complete detection round if this was an impulse
