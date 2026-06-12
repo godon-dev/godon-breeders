@@ -1190,7 +1190,6 @@ class BreederWorker:
                             trial.set_user_attr('guardrails', json.dumps(guardrail_readings))
 
                     if guardrails_violated:
-                        trial.set_user_attr('path_marker', 'guardrail_fail')
                         logger.error(f"Trial {trial.number} failed guardrails: {violations}")
                         self._retry_op(
                             lambda: self.study.tell(trial, state=TrialState.FAIL),
@@ -1211,18 +1210,20 @@ class BreederWorker:
                         self.metrics.inc_trial('failed')
                         self.metrics.inc_effectuation('failure')
                     else:
-                        trial.set_user_attr('path_marker', 'success_else')
                         values = [metrics.get(obj.get('name')) for obj in self.config.get('objectives', [])]
                         logger.info(f"Trial {trial.number} metrics: {metrics}, resolved values: {values}")
                         if any(v is None for v in values):
                             logger.warning(f"Trial {trial.number} has None values for objectives: {[obj.get('name') for obj, v in zip(self.config.get('objectives', []), values) if v is None]}")
                         if self._last_metric_noise:
                             trial.set_user_attr('metric_noise', json.dumps(self._last_metric_noise))
+
+                        # Stash effectuation params BEFORE study.tell — trial is frozen after tell
+                        trial.set_user_attr('effectuation_params', json.dumps(params))
+
                         self._retry_op(
                             lambda: self.study.tell(trial, values),
                             f"study.tell (trial {trial.number})"
                         )
-                        trial.set_user_attr('post_tell', 'ok')
 
                         # If watermarking was active, inject corrected params into Optuna.
                         # The original trial has the sampler's values for watermarked params.
@@ -1245,7 +1246,6 @@ class BreederWorker:
                                 logger.warning(f"Failed to inject corrected trial: {e}")
                             self._wm_corrected_params = None
 
-                        trial.set_user_attr('post_wm_correct', 'ok')
                         trial_duration = time.time() - trial_start_time
 
                         logger.info(f"Trial {trial.number} completed with values: {values}")
@@ -1254,18 +1254,9 @@ class BreederWorker:
                         self.metrics.observe_trial_duration(trial_duration)
                         self.metrics.inc_effectuation('success')
 
-                        # Diagnostic: mark trial as reached success path
-                        trial.set_user_attr('success_path', 'reached')
-
                         if self.study.best_trials and self.study.best_trials[0].number == trial.number:
                             self.metrics.set_best_value(values[0] if values else 0)
 
-                        # Stash effectuation-format params for hold mode retrieval
-                        try:
-                            trial.set_user_attr('effectuation_params', json.dumps(params))
-                            trial.set_user_attr('stash_status', 'ok')
-                        except Exception as stash_err:
-                            trial.set_user_attr('stash_status', f'fail:{stash_err}')
                         self._handle_successful_trial(params)
 
                         # Complete detection round if this was an impulse
