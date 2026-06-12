@@ -133,6 +133,11 @@ class BreederWorker:
         self._wm_corrected_params = None
         self._watermark_baseline = self._compute_baseline_params(settings)
 
+        # Calibrated detection params — populated via AIMD on first use
+        self._calibrated_impulse_params = None
+        self._calibrated_hold_params = None
+        self._impulse_scale = 1.0  # AIMD: multiplicative decrease on FAIL
+
         self._update_state()
 
         self.metrics = BreederMetricsClient(
@@ -467,6 +472,107 @@ class BreederWorker:
             else:
                 results.extend(self._collect_upper_bounds(val, depth + 1))
         return results
+
+    def _get_calibrated_impulse_params(self) -> Optional[Dict[str, Any]]:
+        """Get calibrated impulse params using AIMD approach.
+
+        First call: generate from strain template with upper-bound overrides.
+        Subsequent calls: reuse cached params, scaled down on FAIL.
+        """
+        if self._calibrated_impulse_params is not None:
+            return self._calibrated_impulse_params
+
+        # Need at least one trial to use as strain-formatted template
+        if not self.study or not self.study.trials:
+            return None
+
+        # Try stashed effectuation params from a prior optimize trial
+        template = None
+        for trial in reversed(self.study.trials):
+            if trial.state == TrialState.COMPLETE:
+                stashed = trial.user_attrs.get('effectuation_params')
+                if stashed:
+                    template = json.loads(stashed) if isinstance(stashed, str) else dict(stashed)
+                    break
+
+        if template is None:
+            return None
+
+        # Override top-3 params by range to upper bounds * scale
+        upper_bounds = self._collect_upper_bounds(self.config.get('settings', {}))
+        upper_bounds.sort(key=lambda x: x.get('range', 0), reverse=True)
+
+        params = dict(template)
+        for ub in upper_bounds[:3]:
+            name = ub['name']
+            value = ub['upper'] * self._impulse_scale
+            if ub.get('is_int'):
+                value = int(value)
+            if name in params:
+                if isinstance(params[name], list):
+                    params[name] = [value] * len(params[name])
+                else:
+                    params[name] = value
+
+        self._calibrated_impulse_params = params
+        logger.info(f"Calibrated impulse params at scale {self._impulse_scale:.2f}: {list(params.keys())}")
+        return params
+
+    def _get_calibrated_hold_params(self) -> Optional[Dict[str, Any]]:
+        """Get calibrated hold params — average of last N successful optimize trials.
+
+        Uses stashed effectuation_params to get correct format.
+        Returns None if not enough trials exist yet.
+        """
+        if self._calibrated_hold_params is not None:
+            return self._calibrated_hold_params
+
+        if not self.study or not self.study.trials:
+            return None
+
+        # Collect last 3 successful stashed params
+        successful = []
+        for trial in reversed(self.study.trials):
+            if trial.state == TrialState.COMPLETE and len(successful) < 3:
+                stashed = trial.user_attrs.get('effectuation_params')
+                if stashed:
+                    p = json.loads(stashed) if isinstance(stashed, str) else stashed
+                    successful.append(p)
+
+        if not successful:
+            return None
+
+        if len(successful) == 1:
+            self._calibrated_hold_params = successful[0]
+            return self._calibrated_hold_params
+
+        # Average numeric values across the successful trials
+        result = dict(successful[0])
+        for key in result:
+            if isinstance(result[key], list):
+                lists = [s[key] for s in successful if key in s and isinstance(s[key], list)]
+                if lists:
+                    avg = [sum(vals) / len(vals) for vals in zip(*lists)]
+                    result[key] = avg
+            elif isinstance(result[key], (int, float)):
+                vals = [s[key] for s in successful if key in s and isinstance(s[key], (int, float))]
+                if vals:
+                    result[key] = sum(vals) / len(vals)
+
+        self._calibrated_hold_params = result
+        logger.info(f"Calibrated hold params from {len(successful)} trials: {list(result.keys())}")
+        return result
+
+    def _impulse_aimd_backoff(self):
+        """AIMD multiplicative decrease — called on impulse FAIL."""
+        self._impulse_scale *= 0.5
+        self._calibrated_impulse_params = None  # Force recalibration
+        logger.warning(f"Impulse FAIL — AIMD backoff to scale {self._impulse_scale:.2f}")
+
+        if self._impulse_scale < 0.1:
+            logger.error("Impulse scale below minimum, giving up on detection")
+            return False
+        return True
 
     def _load_or_create_study(self) -> optuna.Study:
         parallel_workers = self.config.get('run', {}).get('parallel', 1)
@@ -973,39 +1079,32 @@ class BreederWorker:
                 try:
                     # Check detection mode — overrides normal sampling
                     detection_mode = self._get_detection_mode()
-                    
-                    if detection_mode == 'hold':
+
+                    # Warmup gate: need at least 1 COMPLETE optimize trial before detection
+                    has_warmup = False
+                    if detection_mode in ('hold', 'impulse') and self.study and self.study.trials:
+                        for t in self.study.trials:
+                            if t.state == TrialState.COMPLETE:
+                                has_warmup = True
+                                break
+
+                    if detection_mode == 'hold' and has_warmup:
                         logger.info(f"Trial {trial.number}: DETECTION HOLD mode")
-                        params = self._get_last_successful_params()
+                        params = self._get_calibrated_hold_params()
                         trial.set_user_attr('detection_mode', 'hold')
                         if not params:
-                            logger.warning("No successful trial to hold, using baseline")
-                            params = self._watermark_baseline
+                            logger.warning("No calibrated hold params yet, optimizing normally")
+                            detection_mode = None  # Fall through to optimize
 
-                    elif detection_mode == 'impulse':
+                    elif detection_mode == 'impulse' and has_warmup:
                         logger.info(f"Trial {trial.number}: DETECTION IMPULSE mode")
-                        params = self._generate_impulse_params(self.config.get('settings', {}))
-                        if not params:
-                            # No prior trial to use as template — suggest fresh params
-                            # via the strain, then override top-3 to upper bounds
-                            logger.warning("No prior trial for impulse template, suggesting fresh params")
-                            base_params = self.strain.suggest_params(trial, self.config.get('settings', {}))
-                            upper_bounds = self._collect_upper_bounds(self.config.get('settings', {}))
-                            upper_bounds.sort(key=lambda x: x.get('range', 0), reverse=True)
-                            for ub in upper_bounds[:3]:
-                                name = ub['name']
-                                value = ub['upper']
-                                if ub.get('is_int'):
-                                    value = int(value)
-                                if name in base_params:
-                                    if isinstance(base_params[name], list):
-                                        base_params[name] = [value] * len(base_params[name])
-                                    else:
-                                        base_params[name] = value
-                            params = base_params
+                        params = self._get_calibrated_impulse_params()
                         trial.set_user_attr('detection_mode', 'impulse')
+                        if not params:
+                            logger.warning("No calibrated impulse params yet, optimizing normally")
+                            detection_mode = None  # Fall through to optimize
 
-                    else:
+                    if not params:
                         params = self.strain.suggest_params(trial, self.config.get('settings', {}))
 
                     if not self.watermark and self._has_active_neighbors():
@@ -1079,6 +1178,10 @@ class BreederWorker:
                             self.metrics.inc_guardrail_violation(guardrail_name)
 
                         self._handle_guardrail_violation(params)
+
+                        # AIMD backoff: if this was an impulse trial, scale down
+                        if detection_mode == 'impulse':
+                            self._impulse_aimd_backoff()
 
                         self.metrics.inc_trial('failed')
                         self.metrics.inc_effectuation('failure')
@@ -1161,6 +1264,9 @@ class BreederWorker:
                             f"study.tell FAIL recovery (trial {trial.number})"
                         )
                         logger.info(f"Trial {trial.number} marked as FAILED")
+                        # AIMD backoff on effectuation failure
+                        if detection_mode == 'impulse':
+                            self._impulse_aimd_backoff()
                     except (ValueError, Exception) as tell_err:
                         logger.info(f"Trial {trial.number} tell failed: {tell_err}")
 
