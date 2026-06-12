@@ -1250,7 +1250,7 @@ class BreederWorker:
                         self.metrics.observe_trial_duration(trial_duration)
                         self.metrics.inc_effectuation('success')
 
-                        if self.study.best_trials[0] and self.study.best_trials[0].number == trial.number:
+                        if self.study.best_trials and self.study.best_trials[0].number == trial.number:
                             self.metrics.set_best_value(values[0] if values else 0)
 
                         # Stash effectuation-format params for hold mode retrieval
