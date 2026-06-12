@@ -116,34 +116,6 @@ def _gather_single_metric(base_url: str, metric_name: str, recon_config: Dict[st
         cv_threshold = recon_config.get('cv_threshold', 0.05)
 
         if stabilization_seconds > 0:
-            time.sleep(stabilization_seconds)
-
-        sample_values = []
-
-        def _take_sample(idx):
-            data = _http_get_with_retry(url, timeout=timeout)
-            if key not in data:
-                return None
-            value = data[key]
-            if value is not None:
-                value = float(value)
-            return value
-
-        for i in range(min_samples):
-            sample_values.append(_take_sample(i))
-            if i < min_samples - 1 and interval > 0:
-                time.sleep(interval)
-
-        raise RuntimeError(f"[DEBUG-PROBE] samples={sample_values} len={len(sample_values)}")
-
-        stabilization_seconds = recon_config.get('stabilization_seconds', 2)
-        min_samples = recon_config.get('samples', 1)
-        max_samples = recon_config.get('max_samples', min_samples)
-        interval = recon_config.get('interval', 0)
-        timeout = recon_config.get('timeout_seconds', 30)
-        cv_threshold = recon_config.get('cv_threshold', 0.05)
-
-        if stabilization_seconds > 0:
             logger.info(f"Waiting {stabilization_seconds}s for stabilization")
             time.sleep(stabilization_seconds)
 
@@ -153,14 +125,16 @@ def _gather_single_metric(base_url: str, metric_name: str, recon_config: Dict[st
 
         def _take_sample(idx):
             data = _http_get_with_retry(url, timeout=timeout)
-            import sys; sys.stderr.write(f"[DEBUG] _take_sample data={data} type={type(data)} key={key}\n")
             if key not in data:
                 logger.warning(f"Key '{key}' not found in response. Available keys: {list(data.keys())}")
                 return None
             value = data[key]
             if value is not None:
                 value = float(value)
-            sys.stderr.write(f"[DEBUG] _take_sample value={value}\n")
+            if value is not None:
+                logger.debug(f"Sample {idx+1}: {value}")
+            else:
+                logger.debug(f"Sample {idx+1}: null value for key '{key}'")
             return value
 
         for i in range(min_samples):
@@ -177,6 +151,7 @@ def _gather_single_metric(base_url: str, metric_name: str, recon_config: Dict[st
                 time.sleep(interval)
 
         aggregation_method = recon_config.get('aggregation', 'median')
+        raise RuntimeError(f"[DEBUG-PROBE] samples={sample_values} agg={aggregation_method}")
         final_value = _aggregate_samples(sample_values, aggregation_method)
         noise_cv = _compute_cv(sample_values)
 
@@ -189,8 +164,6 @@ def _gather_single_metric(base_url: str, metric_name: str, recon_config: Dict[st
         return {'value': final_value, 'noise_cv': round(noise_cv, 6) if noise_cv != float('inf') else None}
 
     except Exception as e:
-        import traceback
-        traceback.print_exc()
         logger.error(f"Failed to gather metric {metric_name}: {e}")
         return {'value': float('inf'), 'noise_cv': None}
 
