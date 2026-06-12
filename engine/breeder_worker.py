@@ -136,7 +136,8 @@ class BreederWorker:
         # Calibrated detection params — populated via AIMD on first use
         self._calibrated_impulse_params = None
         self._calibrated_hold_params = None
-        self._impulse_scale = 1.0  # AIMD: multiplicative decrease on FAIL
+        self._impulse_scale = 1.0
+        self._impulse_base_params = None  # AIMD: multiplicative decrease on FAIL
 
         self._update_state()
 
@@ -515,6 +516,7 @@ class BreederWorker:
                     params[name] = value
 
         self._calibrated_impulse_params = params
+        self._impulse_base_params = dict(template)  # Save base for AIMD re-scaling
         logger.info(f"Calibrated impulse params at scale {self._impulse_scale:.2f}: {list(params.keys())}")
         return params
 
@@ -566,8 +568,26 @@ class BreederWorker:
     def _impulse_aimd_backoff(self):
         """AIMD multiplicative decrease — called on impulse FAIL."""
         self._impulse_scale *= 0.5
-        self._calibrated_impulse_params = None  # Force recalibration
-        logger.warning(f"Impulse FAIL — AIMD backoff to scale {self._impulse_scale:.2f}")
+        # Re-scale from the original base params, don't pick a new template
+        if self._impulse_base_params is not None:
+            upper_bounds = self._collect_upper_bounds(self.config.get('settings', {}))
+            upper_bounds.sort(key=lambda x: x.get('range', 0), reverse=True)
+            params = dict(self._impulse_base_params)
+            for ub in upper_bounds[:3]:
+                name = ub['name']
+                value = ub['upper'] * self._impulse_scale
+                if ub.get('is_int'):
+                    value = int(value)
+                if name in params:
+                    if isinstance(params[name], list):
+                        params[name] = [value] * len(params[name])
+                    else:
+                        params[name] = value
+            self._calibrated_impulse_params = params
+            logger.warning(f"Impulse FAIL — AIMD backoff to scale {self._impulse_scale:.2f}")
+        else:
+            self._calibrated_impulse_params = None
+            logger.warning(f"Impulse FAIL — AIMD backoff to scale {self._impulse_scale:.2f}, no base params")
 
         if self._impulse_scale < 0.1:
             logger.error("Impulse scale below minimum, giving up on detection")
