@@ -137,7 +137,8 @@ class BreederWorker:
         self._calibrated_impulse_params = None
         self._calibrated_hold_params = None
         self._impulse_scale = 1.0
-        self._impulse_base_params = None  # AIMD: multiplicative decrease on FAIL
+        self._impulse_base_params = None
+        self._impulse_trials_in_round = 0
 
         self._update_state()
 
@@ -1259,9 +1260,13 @@ class BreederWorker:
 
                         self._handle_successful_trial(params)
 
-                        # Complete detection round if this was an impulse
+                        # Complete detection round after configured number of impulses
                         if detection_mode == 'impulse':
-                            self._complete_detection_round()
+                            self._impulse_trials_in_round += 1
+                            impulse_target = self.config.get('detection', {}).get('impulse_trials_per_round', 5)
+                            if self._impulse_trials_in_round >= impulse_target:
+                                self._complete_detection_round()
+                                self._impulse_trials_in_round = 0
 
                         if self.communication_callback:
                             frozen_trial = self.study.trials[-1]
