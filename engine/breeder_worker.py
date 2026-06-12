@@ -1190,6 +1190,7 @@ class BreederWorker:
                             trial.set_user_attr('guardrails', json.dumps(guardrail_readings))
 
                     if guardrails_violated:
+                        trial.set_user_attr('path_marker', 'guardrail_fail')
                         logger.error(f"Trial {trial.number} failed guardrails: {violations}")
                         self._retry_op(
                             lambda: self.study.tell(trial, state=TrialState.FAIL),
@@ -1210,6 +1211,7 @@ class BreederWorker:
                         self.metrics.inc_trial('failed')
                         self.metrics.inc_effectuation('failure')
                     else:
+                        trial.set_user_attr('path_marker', 'success_else')
                         values = [metrics.get(obj.get('name')) for obj in self.config.get('objectives', [])]
                         logger.info(f"Trial {trial.number} metrics: {metrics}, resolved values: {values}")
                         if any(v is None for v in values):
