@@ -1254,7 +1254,11 @@ class BreederWorker:
                             self.metrics.set_best_value(values[0] if values else 0)
 
                         # Stash effectuation-format params for hold mode retrieval
-                        trial.set_user_attr('effectuation_params', json.dumps(params))
+                        try:
+                            trial.set_user_attr('effectuation_params', json.dumps(params))
+                            logger.info(f"Stashed effectuation_params for trial {trial.number}")
+                        except Exception as stash_err:
+                            logger.warning(f"Failed to stash effectuation_params: {stash_err}")
                         self._handle_successful_trial(params)
 
                         # Complete detection round if this was an impulse
