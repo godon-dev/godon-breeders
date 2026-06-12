@@ -1222,6 +1222,7 @@ class BreederWorker:
                             lambda: self.study.tell(trial, values),
                             f"study.tell (trial {trial.number})"
                         )
+                        trial.set_user_attr('post_tell', 'ok')
 
                         # If watermarking was active, inject corrected params into Optuna.
                         # The original trial has the sampler's values for watermarked params.
@@ -1244,6 +1245,7 @@ class BreederWorker:
                                 logger.warning(f"Failed to inject corrected trial: {e}")
                             self._wm_corrected_params = None
 
+                        trial.set_user_attr('post_wm_correct', 'ok')
                         trial_duration = time.time() - trial_start_time
 
                         logger.info(f"Trial {trial.number} completed with values: {values}")
