@@ -1112,7 +1112,9 @@ class BreederWorker:
                         if self.watermark:
                             logger.info(f"Watermarking activated (lazy): {self.watermark.metadata()}")
 
-                    if self.watermark:
+                    # Watermark and detection modes are mutually exclusive —
+                    # coordinated detection replaces the old watermark system.
+                    if self.watermark and detection_mode not in ('hold', 'impulse'):
                         wm_complete = hasattr(self.watermark, 'is_complete') and self.watermark.is_complete()
                         if not wm_complete:
                             wm_params = self.watermark.generate(self._watermark_trial_idx, params)
