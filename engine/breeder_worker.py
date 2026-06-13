@@ -1217,27 +1217,11 @@ class BreederWorker:
 
                     if guardrails_violated:
                         logger.error(f"Trial {trial.number} failed guardrails: {violations}")
-
-                        # During hold mode, guardrail violations are caused by sender coupling.
-                        # Record the degraded values as COMPLETE — the deviation IS the signal.
-                        if detection_mode == 'hold':
-                            logger.info(f"Trial {trial.number}: hold guardrail violation recorded as signal")
-                            trial.set_user_attr('guardrail_violation', json.dumps(violations))
-                            values = [metrics.get(obj.get('name')) for obj in self.config.get('objectives', [])]
-                            trial.set_user_attr('effectuation_params', json.dumps(params))
-                            self._retry_op(
-                                lambda: self.study.tell(trial, values),
-                                f"study.tell hold guardrail (trial {trial.number})"
-                            )
-                            self.metrics.inc_trial('complete', value=values[0] if values else None)
-                            self._handle_successful_trial(params)
-
-                        else:
-                            self._retry_op(
-                                lambda: self.study.tell(trial, state=TrialState.FAIL),
-                                f"study.tell FAIL (trial {trial.number})"
-                            )
-                            logger.info(f"Trial {trial.number} marked as FAILED (guardrail violation)")
+                        self._retry_op(
+                            lambda: self.study.tell(trial, state=TrialState.FAIL),
+                            f"study.tell FAIL (trial {trial.number})"
+                        )
+                        logger.info(f"Trial {trial.number} marked as FAILED (guardrail violation)")
 
                         for violation_msg in violations:
                             guardrail_name = violation_msg.split(':')[0] if ':' in violation_msg else 'unknown'
