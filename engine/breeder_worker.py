@@ -396,17 +396,27 @@ class BreederWorker:
             logger.warning(f"Failed to complete detection round: {e}")
 
     def _start_new_detection_round(self):
-        """Insert a new active round for this breeder as sender, keeping the cycle going."""
-        def op(conn):
+        """Insert a new active round for this breeder, but only if no other rounds are active.
+        This ensures sequential one-sender-at-a-time coordination."""
+        def check_and_insert(conn):
             cur = conn.cursor()
+            cur.execute("SELECT count(*) FROM detection_rounds WHERE status = 'active'")
+            active_count = cur.fetchone()[0]
+            if active_count > 0:
+                cur.close()
+                return False
             cur.execute(
                 "INSERT INTO detection_rounds (sender_id) VALUES (%s)",
                 (self.breeder_id,)
             )
             cur.close()
+            return True
         try:
-            self._with_shared_db(op, "start_new_detection_round")
-            logger.info("Started new detection round as sender")
+            started = self._with_shared_db(check_and_insert, "start_new_detection_round")
+            if started:
+                logger.info("Started new detection round as sender")
+            else:
+                logger.info("Deferring new round — other active rounds exist")
         except Exception as e:
             logger.warning(f"Failed to start new detection round: {e}")
 
@@ -1207,11 +1217,27 @@ class BreederWorker:
 
                     if guardrails_violated:
                         logger.error(f"Trial {trial.number} failed guardrails: {violations}")
-                        self._retry_op(
-                            lambda: self.study.tell(trial, state=TrialState.FAIL),
-                            f"study.tell FAIL (trial {trial.number})"
-                        )
-                        logger.info(f"Trial {trial.number} marked as FAILED (guardrail violation)")
+
+                        # During hold mode, guardrail violations are caused by sender coupling.
+                        # Record the degraded values as COMPLETE — the deviation IS the signal.
+                        if detection_mode == 'hold':
+                            logger.info(f"Trial {trial.number}: hold guardrail violation recorded as signal")
+                            trial.set_user_attr('guardrail_violation', json.dumps(violations))
+                            values = [metrics.get(obj.get('name')) for obj in self.config.get('objectives', [])]
+                            trial.set_user_attr('effectuation_params', json.dumps(params))
+                            self._retry_op(
+                                lambda: self.study.tell(trial, values),
+                                f"study.tell hold guardrail (trial {trial.number})"
+                            )
+                            self.metrics.inc_trial('complete', value=values[0] if values else None)
+                            self._handle_successful_trial(params)
+
+                        else:
+                            self._retry_op(
+                                lambda: self.study.tell(trial, state=TrialState.FAIL),
+                                f"study.tell FAIL (trial {trial.number})"
+                            )
+                            logger.info(f"Trial {trial.number} marked as FAILED (guardrail violation)")
 
                         for violation_msg in violations:
                             guardrail_name = violation_msg.split(':')[0] if ':' in violation_msg else 'unknown'
