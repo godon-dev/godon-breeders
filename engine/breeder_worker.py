@@ -1285,7 +1285,14 @@ class BreederWorker:
 
                         # AIMD backoff: if this was an impulse trial, scale down
                         if detection_mode == 'impulse':
-                            self._impulse_aimd_backoff()
+                            keep_detecting = self._impulse_aimd_backoff()
+                            if not keep_detecting:
+                                logger.info("Impulse detection abandoned — scale below minimum")
+                                self._calibrated_impulse_params = None
+                                self._impulse_scale = 1.0
+                                # Complete round so receiver can stop holding
+                                self._complete_detection_round()
+                                self._start_new_detection_round()
 
                         self.metrics.inc_trial('failed')
                         self.metrics.inc_effectuation('failure')
