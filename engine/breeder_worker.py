@@ -380,7 +380,7 @@ class BreederWorker:
             return 'optimize'
 
     def _complete_detection_round(self):
-        """Mark the current active round as completed after impulse."""
+        """Mark the current active round as completed, then start a new one."""
         def op(conn):
             cur = conn.cursor()
             cur.execute(
@@ -394,6 +394,21 @@ class BreederWorker:
             logger.info("Detection round completed")
         except Exception as e:
             logger.warning(f"Failed to complete detection round: {e}")
+
+    def _start_new_detection_round(self):
+        """Insert a new active round for this breeder as sender, keeping the cycle going."""
+        def op(conn):
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO detection_rounds (sender_id) VALUES (%s)",
+                (self.breeder_id,)
+            )
+            cur.close()
+        try:
+            self._with_shared_db(op, "start_new_detection_round")
+            logger.info("Started new detection round as sender")
+        except Exception as e:
+            logger.warning(f"Failed to start new detection round: {e}")
 
     def _get_last_successful_params(self) -> Optional[Dict[str, Any]]:
         """Get effectuation-format params from the last completed trial for hold mode.
@@ -1266,6 +1281,7 @@ class BreederWorker:
                             impulse_target = self.config.get('detection', {}).get('impulse_trials_per_round', 5)
                             if self._impulse_trials_in_round >= impulse_target:
                                 self._complete_detection_round()
+                                self._start_new_detection_round()
                                 self._impulse_trials_in_round = 0
 
                         if self.communication_callback:
