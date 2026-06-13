@@ -396,13 +396,20 @@ class BreederWorker:
             logger.warning(f"Failed to complete detection round: {e}")
 
     def _start_new_detection_round(self):
-        """Insert a new active round for this breeder, but only if no other rounds are active.
-        This ensures sequential one-sender-at-a-time coordination."""
+        """Insert a new active round for this breeder, but only if no other rounds are active
+        AND this breeder hasn't sent recently. This ensures alternating turns between breeders."""
         def check_and_insert(conn):
             cur = conn.cursor()
+            # Don't start if any round is already active
             cur.execute("SELECT count(*) FROM detection_rounds WHERE status = 'active'")
             active_count = cur.fetchone()[0]
             if active_count > 0:
+                cur.close()
+                return False
+            # Don't start if we were the most recent sender — yield to others
+            cur.execute("SELECT sender_id FROM detection_rounds ORDER BY round_id DESC LIMIT 1")
+            row = cur.fetchone()
+            if row and row[0] == self.breeder_id:
                 cur.close()
                 return False
             cur.execute(
