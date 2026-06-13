@@ -420,6 +420,56 @@ class BreederWorker:
         except Exception as e:
             logger.warning(f"Failed to start new detection round: {e}")
 
+    def _flag_receiver_violation(self):
+        """Receiver flags the sender's active round that it broke guardrails."""
+        def op(conn):
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE detection_rounds SET receiver_violated = TRUE "
+                "WHERE status = 'active' AND sender_id != %s",
+                (self.breeder_id,)
+            )
+            cur.close()
+        try:
+            self._with_shared_db(op, "flag_receiver_violation")
+            logger.info("Flagged receiver guardrail violation to sender")
+        except Exception as e:
+            logger.warning(f"Failed to flag receiver violation: {e}")
+
+    def _check_receiver_violation(self):
+        """Sender checks if receiver flagged a violation on its active round.
+        Returns True if receiver broke guardrails during this round."""
+        def op(conn):
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT receiver_violated FROM detection_rounds "
+                "WHERE status = 'active' AND sender_id = %s LIMIT 1",
+                (self.breeder_id,)
+            )
+            row = cur.fetchone()
+            cur.close()
+            return row[0] if row else False
+        try:
+            return self._with_shared_db(op, "check_receiver_violation")
+        except Exception as e:
+            logger.warning(f"Failed to check receiver violation: {e}")
+            return False
+
+    def _clear_receiver_violation(self):
+        """Sender resets the receiver violation flag after processing AIMD backoff."""
+        def op(conn):
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE detection_rounds SET receiver_violated = FALSE "
+                "WHERE status = 'active' AND sender_id = %s",
+                (self.breeder_id,)
+            )
+            cur.close()
+        try:
+            self._with_shared_db(op, "clear_receiver_violation")
+        except Exception as e:
+            logger.warning(f"Failed to clear receiver violation: {e}")
+
     def _get_last_successful_params(self) -> Optional[Dict[str, Any]]:
         """Get effectuation-format params from the last completed trial for hold mode.
 
@@ -1223,6 +1273,10 @@ class BreederWorker:
                         )
                         logger.info(f"Trial {trial.number} marked as FAILED (guardrail violation)")
 
+                        # Receiver flags violation so sender can scale down
+                        if detection_mode == 'hold':
+                            self._flag_receiver_violation()
+
                         for violation_msg in violations:
                             guardrail_name = violation_msg.split(':')[0] if ':' in violation_msg else 'unknown'
                             self.metrics.inc_guardrail_violation(guardrail_name)
@@ -1289,6 +1343,15 @@ class BreederWorker:
                         if detection_mode == 'impulse':
                             self._impulse_trials_in_round += 1
                             impulse_target = self.config.get('detection', {}).get('impulse_trials_per_round', 5)
+
+                            # Check if receiver flagged a violation — scale down if so
+                            if self._check_receiver_violation():
+                                logger.info(f"Receiver flagged violation during round — AIMD backoff")
+                                self._impulse_aimd_backoff()
+                                self._impulse_trials_in_round = 0  # Don't count toward completion
+                                # Reset the flag so next impulse gets a clean check
+                                self._clear_receiver_violation()
+
                             if self._impulse_trials_in_round >= impulse_target:
                                 self._complete_detection_round()
                                 self._start_new_detection_round()
