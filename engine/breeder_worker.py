@@ -362,6 +362,16 @@ class BreederWorker:
         """
         def op(conn):
             cur = conn.cursor()
+            # Check if THIS breeder has an active round (is sender)
+            cur.execute(
+                "SELECT round_id FROM detection_rounds WHERE status = 'active' AND sender_id = %s LIMIT 1",
+                (self.breeder_id,)
+            )
+            row = cur.fetchone()
+            if row:
+                cur.close()
+                return 'impulse'
+            # Otherwise check if anyone else is sending
             cur.execute(
                 "SELECT sender_id FROM detection_rounds WHERE status = 'active' LIMIT 1"
             )
@@ -369,15 +379,27 @@ class BreederWorker:
             cur.close()
             if row is None:
                 return 'optimize'
-            sender_id = row[0]
-            if sender_id == self.breeder_id:
-                return 'impulse'
             return 'hold'
         try:
             return self._with_shared_db(op, "get_detection_mode")
         except Exception as e:
             logger.warning(f"Failed to read detection mode: {e}")
             return 'optimize'
+
+    def _cleanup_stale_rounds(self):
+        """Complete all active rounds at detection start to reset coordination.
+        Called once when warmup completes, before the first detection round."""
+        def op(conn):
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE detection_rounds SET status = 'completed', completed_at = NOW() WHERE status = 'active'"
+            )
+            cur.close()
+        try:
+            self._with_shared_db(op, "cleanup_stale_rounds")
+            logger.info("Cleaned up stale controller-created rounds")
+        except Exception as e:
+            logger.warning(f"Failed to cleanup stale rounds: {e}")
 
     def _complete_detection_round(self):
         """Mark the current active round as completed, then start a new one."""
@@ -1216,6 +1238,14 @@ class BreederWorker:
                     warmup_target = self.config.get('detection', {}).get('warmup_trials', 15)
                     complete_count = sum(1 for t in self.study.trials if t.state == TrialState.COMPLETE) if self.study and self.study.trials else 0
                     has_warmup = complete_count >= warmup_target
+
+                    # If warmup passed and no active rounds, clean up stale controller rounds and start fresh
+                    if has_warmup and detection_mode in ('hold', 'impulse'):
+                        # First time entering detection — clean up controller-created rounds
+                        if not getattr(self, '_detection_initialized', False):
+                            self._cleanup_stale_rounds()
+                            self._detection_initialized = True
+                            detection_mode = 'optimize'  # Will start fresh next trial
 
                     # If warmup passed and no active rounds, start one
                     if has_warmup and detection_mode == 'optimize':
