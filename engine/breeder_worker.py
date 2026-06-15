@@ -1221,6 +1221,11 @@ class BreederWorker:
                     complete_count = sum(1 for t in self.study.trials if t.state == TrialState.COMPLETE) if self.study and self.study.trials else 0
                     has_warmup = complete_count >= warmup_target
 
+                    # If warmup passed and no active rounds, start one
+                    if has_warmup and detection_mode == 'optimize':
+                        self._start_new_detection_round()
+                        detection_mode = self._get_detection_mode()
+
                     if detection_mode == 'hold' and has_warmup:
                         logger.info(f"Trial {trial.number}: DETECTION HOLD mode")
                         params = self._get_calibrated_hold_params()
