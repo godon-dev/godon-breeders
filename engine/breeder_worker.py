@@ -589,29 +589,26 @@ class BreederWorker:
         return results
 
     def _get_calibrated_impulse_params(self) -> Optional[Dict[str, Any]]:
-        """Get impulse params — alternates between extreme and baseline to create oscillating signal.
+        """Get impulse params — pulsed pattern like sonar: ping then listen.
         
-        Even trials (0,2,4): extreme params (upper bounds on top-3)
-        Odd trials (1,3): baseline params (best warmup trial)
-        This creates a detectable square-wave perturbation.
+        Even trials (0,2,4): extreme params (the ping)
+        Odd trials (1,3,5): baseline params (the listen period)
         """
-        # Need at least one trial to use as strain-formatted template
         if not self.study or not self.study.trials:
             return None
 
-        # Get baseline from best warmup trial
         baseline = self._get_last_successful_params()
         if baseline is None:
             return None
 
-        # Alternate: even = extreme, odd = baseline
-        is_extreme = self._impulse_trials_in_round % 2 == 0
+        # Alternate: even = ping (extreme), odd = listen (baseline)
+        is_ping = self._impulse_trials_in_round % 2 == 0
 
-        if not is_extreme:
-            # Baseline trial — same params as hold mode
+        if not is_ping:
+            # Listen period — same params as hold mode
             return dict(baseline)
 
-        # Extreme trial — generate from baseline with upper-bound overrides
+        # Ping — generate extreme params from baseline
         if self._calibrated_impulse_params is not None:
             return self._calibrated_impulse_params
 
@@ -630,7 +627,6 @@ class BreederWorker:
                 else:
                     params[name] = value
 
-        # Cache for reuse on subsequent extreme trials
         self._calibrated_impulse_params = params
         self._impulse_base_params = dict(baseline)
         logger.info(f"Calibrated impulse params at scale {self._impulse_scale:.2f}: {list(params.keys())}")
@@ -1387,9 +1383,6 @@ class BreederWorker:
                             self._impulse_trials_in_round += 1
                             impulse_target = self.config.get('detection', {}).get('impulse_trials_per_round', 10)
 
-                            # Only process AIMD/round-completion on extreme trials (even-numbered)
-                            is_extreme = self._impulse_trials_in_round % 2 == 0
-
                             # Check if receiver flagged a violation — scale down if so
                             if self._check_receiver_violation():
                                 logger.info(f"Receiver flagged violation during round — AIMD backoff")
@@ -1430,9 +1423,7 @@ class BreederWorker:
                             f"study.tell FAIL recovery (trial {trial.number})"
                         )
                         logger.info(f"Trial {trial.number} marked as FAILED")
-                        # AIMD backoff on effectuation failure
-                        if detection_mode == 'impulse':
-                            self._impulse_aimd_backoff()
+                        # AIMD backoff ONLY from receiver_violated signal, never from sender's own failure
                     except (ValueError, Exception) as tell_err:
                         logger.info(f"Trial {trial.number} tell failed: {tell_err}")
 
