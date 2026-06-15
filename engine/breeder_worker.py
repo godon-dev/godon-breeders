@@ -1223,7 +1223,7 @@ class BreederWorker:
                     detection_mode = self._get_detection_mode()
 
                     # Warmup gate: need at least N COMPLETE trials before detection
-                    warmup_target = self.config.get('detection', {}).get('warmup_trials', 5)
+                    warmup_target = self.config.get('detection', {}).get('warmup_trials', 15)
                     complete_count = sum(1 for t in self.study.trials if t.state == TrialState.COMPLETE) if self.study and self.study.trials else 0
                     has_warmup = complete_count >= warmup_target
 
