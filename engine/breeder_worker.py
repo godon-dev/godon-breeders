@@ -1321,10 +1321,9 @@ class BreederWorker:
 
                         self._handle_guardrail_violation(params)
 
-                        # AIMD backoff ONLY from cross-breeder receiver signal, not own guardrails
-                        # The sender's own guardrail crash during impulse is expected — the point
-                        # is to push hard. Only scale down if the RECEIVER breaks.
-                        # (receiver_violated check is in the success path below)
+                        # AIMD backoff on impulse guardrail violation — find survivable impulse scale
+                        if detection_mode == 'impulse':
+                            self._impulse_aimd_backoff()
 
                         self.metrics.inc_trial('failed')
                         self.metrics.inc_effectuation('failure')
