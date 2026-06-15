@@ -396,13 +396,19 @@ class BreederWorker:
             logger.warning(f"Failed to complete detection round: {e}")
 
     def _start_new_detection_round(self):
-        """Insert a new active round for this breeder if no other rounds are active.
-        Ensures sequential one-sender-at-a-time coordination."""
+        """Insert a new active round for this breeder if no other rounds are active
+        AND this breeder wasn't the most recent sender. Ensures alternating turns."""
         def check_and_insert(conn):
             cur = conn.cursor()
             cur.execute("SELECT count(*) FROM detection_rounds WHERE status = 'active'")
             active_count = cur.fetchone()[0]
             if active_count > 0:
+                cur.close()
+                return False
+            # Don't start if we were the most recent sender — yield to others
+            cur.execute("SELECT sender_id FROM detection_rounds ORDER BY round_id DESC LIMIT 1")
+            row = cur.fetchone()
+            if row and row[0] == self.breeder_id:
                 cur.close()
                 return False
             cur.execute(
@@ -583,35 +589,36 @@ class BreederWorker:
         return results
 
     def _get_calibrated_impulse_params(self) -> Optional[Dict[str, Any]]:
-        """Get calibrated impulse params using AIMD approach.
-
-        First call: generate from strain template with upper-bound overrides.
-        Subsequent calls: reuse cached params, scaled down on FAIL.
+        """Get impulse params — alternates between extreme and baseline to create oscillating signal.
+        
+        Even trials (0,2,4): extreme params (upper bounds on top-3)
+        Odd trials (1,3): baseline params (best warmup trial)
+        This creates a detectable square-wave perturbation.
         """
-        if self._calibrated_impulse_params is not None:
-            return self._calibrated_impulse_params
-
         # Need at least one trial to use as strain-formatted template
         if not self.study or not self.study.trials:
             return None
 
-        # Try stashed effectuation params from a prior optimize trial
-        template = None
-        for trial in reversed(self.study.trials):
-            if trial.state == TrialState.COMPLETE:
-                stashed = trial.user_attrs.get('effectuation_params')
-                if stashed:
-                    template = json.loads(stashed) if isinstance(stashed, str) else dict(stashed)
-                    break
-
-        if template is None:
+        # Get baseline from best warmup trial
+        baseline = self._get_last_successful_params()
+        if baseline is None:
             return None
 
-        # Override top-3 params by range to upper bounds * scale
+        # Alternate: even = extreme, odd = baseline
+        is_extreme = self._impulse_trials_in_round % 2 == 0
+
+        if not is_extreme:
+            # Baseline trial — same params as hold mode
+            return dict(baseline)
+
+        # Extreme trial — generate from baseline with upper-bound overrides
+        if self._calibrated_impulse_params is not None:
+            return self._calibrated_impulse_params
+
         upper_bounds = self._collect_upper_bounds(self.config.get('settings', {}))
         upper_bounds.sort(key=lambda x: x.get('range', 0), reverse=True)
 
-        params = dict(template)
+        params = dict(baseline)
         for ub in upper_bounds[:3]:
             name = ub['name']
             value = ub['upper'] * self._impulse_scale
@@ -623,8 +630,9 @@ class BreederWorker:
                 else:
                     params[name] = value
 
+        # Cache for reuse on subsequent extreme trials
         self._calibrated_impulse_params = params
-        self._impulse_base_params = dict(template)  # Save base for AIMD re-scaling
+        self._impulse_base_params = dict(baseline)
         logger.info(f"Calibrated impulse params at scale {self._impulse_scale:.2f}: {list(params.keys())}")
         return params
 
@@ -1378,7 +1386,7 @@ class BreederWorker:
                         # Complete detection round after configured number of impulses
                         if detection_mode == 'impulse':
                             self._impulse_trials_in_round += 1
-                            impulse_target = self.config.get('detection', {}).get('impulse_trials_per_round', 5)
+                            impulse_target = self.config.get('detection', {}).get('impulse_trials_per_round', 10)
 
                             # Check if receiver flagged a violation — scale down if so
                             if self._check_receiver_violation():
