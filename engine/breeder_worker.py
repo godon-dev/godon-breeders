@@ -1325,16 +1325,10 @@ class BreederWorker:
 
                         self._handle_guardrail_violation(params)
 
-                        # AIMD backoff: if this was an impulse trial, scale down
-                        if detection_mode == 'impulse':
-                            keep_detecting = self._impulse_aimd_backoff()
-                            if not keep_detecting:
-                                logger.info("Impulse detection abandoned — scale below minimum")
-                                self._calibrated_impulse_params = None
-                                self._impulse_scale = 1.0
-                                # Complete round so receiver can stop holding
-                                self._complete_detection_round()
-                                self._start_new_detection_round()
+                        # AIMD backoff ONLY from cross-breeder receiver signal, not own guardrails
+                        # The sender's own guardrail crash during impulse is expected — the point
+                        # is to push hard. Only scale down if the RECEIVER breaks.
+                        # (receiver_violated check is in the success path below)
 
                         self.metrics.inc_trial('failed')
                         self.metrics.inc_effectuation('failure')
@@ -1392,6 +1386,9 @@ class BreederWorker:
                         if detection_mode == 'impulse':
                             self._impulse_trials_in_round += 1
                             impulse_target = self.config.get('detection', {}).get('impulse_trials_per_round', 10)
+
+                            # Only process AIMD/round-completion on extreme trials (even-numbered)
+                            is_extreme = self._impulse_trials_in_round % 2 == 0
 
                             # Check if receiver flagged a violation — scale down if so
                             if self._check_receiver_violation():
