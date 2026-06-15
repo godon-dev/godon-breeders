@@ -478,58 +478,51 @@ class BreederWorker:
             logger.warning(f"Failed to clear receiver violation: {e}")
 
     def _get_last_successful_params(self) -> Optional[Dict[str, Any]]:
-        """Get median effectuation params from warmup trials for hold mode.
+        """Get effectuation params from the best warmup trial for hold mode.
         
-        Uses the median of the first N complete optimize trials' stashed
-        effectuation_params to find a stable mediocre operating point.
-        Falls back to last successful trial if not enough warmup data.
+        Uses the trial with the best objective value from the warmup phase
+        as a stable operating baseline.
         """
         if not self.study or not self.study.trials:
             return None
 
-        warmup_target = self.config.get('detection', {}).get('warmup_trials', 5)
+        best_trial = None
+        best_value = None
+        # Check optimization direction for first objective
+        objectives = self.config.get('objectives', [])
+        minimize = objectives and objectives[0].get('direction', '').lower() == 'minimize'
         
-        # Collect stashed effectuation_params from complete trials (warmup phase)
-        warmup_params = []
         for trial in self.study.trials:
             if trial.state != TrialState.COMPLETE:
                 continue
             stashed = trial.user_attrs.get('effectuation_params')
-            if stashed:
-                p = json.loads(stashed) if isinstance(stashed, str) else dict(stashed)
-                warmup_params.append(p)
-            if len(warmup_params) >= warmup_target:
-                break
-
-        if not warmup_params:
-            # Fallback: any complete trial
-            for trial in reversed(self.study.trials):
-                if trial.state == TrialState.COMPLETE:
-                    stashed = trial.user_attrs.get('effectuation_params')
-                    if stashed:
-                        return json.loads(stashed) if isinstance(stashed, str) else stashed
-                    return dict(trial.params)
-            return None
-
-        # Compute median across all warmup params
-        result = {}
-        for key in warmup_params[0].keys():
-            values = [p[key] for p in warmup_params if key in p]
+            if not stashed:
+                continue
+            values = trial.values if hasattr(trial, 'values') else None
             if not values:
                 continue
-            if isinstance(values[0], list):
-                # Per-zone params: median each zone independently
-                zone_count = len(values[0])
-                medians = []
-                for zi in range(zone_count):
-                    zone_vals = sorted([v[zi] for v in values if len(v) > zi])
-                    medians.append(zone_vals[len(zone_vals) // 2])
-                result[key] = medians
-            else:
-                sorted_vals = sorted(values)
-                result[key] = sorted_vals[len(sorted_vals) // 2]
+            v = values[0]
+            if best_value is None:
+                best_value = v
+                best_trial = stashed
+            elif minimize and v < best_value:
+                best_value = v
+                best_trial = stashed
+            elif not minimize and v > best_value:
+                best_value = v
+                best_trial = stashed
 
-        return result
+        if best_trial:
+            return json.loads(best_trial) if isinstance(best_trial, str) else dict(best_trial)
+
+        # Fallback: last complete trial
+        for trial in reversed(self.study.trials):
+            if trial.state == TrialState.COMPLETE:
+                stashed = trial.user_attrs.get('effectuation_params')
+                if stashed:
+                    return json.loads(stashed) if isinstance(stashed, str) else stashed
+                return dict(trial.params)
+        return None
 
     def _generate_impulse_params(self, settings: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Generate params pushed to upper bounds for impulse mode.
