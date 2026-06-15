@@ -478,19 +478,58 @@ class BreederWorker:
             logger.warning(f"Failed to clear receiver violation: {e}")
 
     def _get_last_successful_params(self) -> Optional[Dict[str, Any]]:
-        """Get effectuation-format params from the last completed trial for hold mode.
-
-        Reads the stashed effectuation_params user_attr which preserves the format
-        that suggest_params returned and the effectuator expects.
-        Falls back to flat trial.params if no stashed attr found.
+        """Get median effectuation params from warmup trials for hold mode.
+        
+        Uses the median of the first N complete optimize trials' stashed
+        effectuation_params to find a stable mediocre operating point.
+        Falls back to last successful trial if not enough warmup data.
         """
-        for trial in reversed(self.study.trials):
-            if trial.state == TrialState.COMPLETE:
-                stashed = trial.user_attrs.get('effectuation_params')
-                if stashed:
-                    return json.loads(stashed) if isinstance(stashed, str) else stashed
-                return dict(trial.params)
-        return None
+        if not self.study or not self.study.trials:
+            return None
+
+        warmup_target = self.config.get('detection', {}).get('warmup_trials', 5)
+        
+        # Collect stashed effectuation_params from complete trials (warmup phase)
+        warmup_params = []
+        for trial in self.study.trials:
+            if trial.state != TrialState.COMPLETE:
+                continue
+            stashed = trial.user_attrs.get('effectuation_params')
+            if stashed:
+                p = json.loads(stashed) if isinstance(stashed, str) else dict(stashed)
+                warmup_params.append(p)
+            if len(warmup_params) >= warmup_target:
+                break
+
+        if not warmup_params:
+            # Fallback: any complete trial
+            for trial in reversed(self.study.trials):
+                if trial.state == TrialState.COMPLETE:
+                    stashed = trial.user_attrs.get('effectuation_params')
+                    if stashed:
+                        return json.loads(stashed) if isinstance(stashed, str) else stashed
+                    return dict(trial.params)
+            return None
+
+        # Compute median across all warmup params
+        result = {}
+        for key in warmup_params[0].keys():
+            values = [p[key] for p in warmup_params if key in p]
+            if not values:
+                continue
+            if isinstance(values[0], list):
+                # Per-zone params: median each zone independently
+                zone_count = len(values[0])
+                medians = []
+                for zi in range(zone_count):
+                    zone_vals = sorted([v[zi] for v in values if len(v) > zi])
+                    medians.append(zone_vals[len(zone_vals) // 2])
+                result[key] = medians
+            else:
+                sorted_vals = sorted(values)
+                result[key] = sorted_vals[len(sorted_vals) // 2]
+
+        return result
 
     def _generate_impulse_params(self, settings: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Generate params pushed to upper bounds for impulse mode.
@@ -1183,13 +1222,10 @@ class BreederWorker:
                     # Check detection mode — overrides normal sampling
                     detection_mode = self._get_detection_mode()
 
-                    # Warmup gate: need at least 1 COMPLETE optimize trial before detection
-                    has_warmup = False
-                    if detection_mode in ('hold', 'impulse') and self.study and self.study.trials:
-                        for t in self.study.trials:
-                            if t.state == TrialState.COMPLETE:
-                                has_warmup = True
-                                break
+                    # Warmup gate: need at least N COMPLETE trials before detection
+                    warmup_target = self.config.get('detection', {}).get('warmup_trials', 5)
+                    complete_count = sum(1 for t in self.study.trials if t.state == TrialState.COMPLETE) if self.study and self.study.trials else 0
+                    has_warmup = complete_count >= warmup_target
 
                     if detection_mode == 'hold' and has_warmup:
                         logger.info(f"Trial {trial.number}: DETECTION HOLD mode")
