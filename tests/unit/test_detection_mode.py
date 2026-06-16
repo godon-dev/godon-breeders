@@ -111,7 +111,8 @@ class TestGetDetectionMode:
 
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
-        mock_cursor.fetchone.return_value = ('sender-abc',)
+        # First query (own round check): found — this breeder has an active round
+        mock_cursor.fetchone.return_value = (1,)
         mock_conn.cursor.return_value = mock_cursor
 
         with patch.object(worker, '_with_shared_db') as mock_db:
@@ -129,7 +130,9 @@ class TestGetDetectionMode:
 
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
-        mock_cursor.fetchone.return_value = ('sender-abc',)
+        # First query (own round check): None — this breeder has no active round
+        # Second query (any sender check): another breeder is sender
+        mock_cursor.fetchone.side_effect = [None, ('sender-abc',)]
         mock_conn.cursor.return_value = mock_cursor
 
         with patch.object(worker, '_with_shared_db') as mock_db:

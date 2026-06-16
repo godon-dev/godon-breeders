@@ -1262,13 +1262,15 @@ class BreederWorker:
                             trial.set_user_attr('detection_mode', 'hold')
 
                     elif detection_mode == 'impulse' and has_warmup:
-                        logger.info(f"Trial {trial.number}: DETECTION IMPULSE mode")
                         params = self._get_calibrated_impulse_params()
                         if not params:
                             logger.warning("No calibrated impulse params yet, optimizing normally")
                             detection_mode = None  # Fall through to optimize
                         else:
                             trial.set_user_attr('detection_mode', 'impulse')
+                            # Tag ping vs listen phase for matched filter detection
+                            is_ping = self._impulse_trials_in_round % 2 == 0
+                            trial.set_user_attr('impulse_phase', 'ping' if is_ping else 'listen')
 
                     if not params:
                         params = self.strain.suggest_params(trial, self.config.get('settings', {}))
