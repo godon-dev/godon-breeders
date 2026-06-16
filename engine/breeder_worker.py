@@ -98,7 +98,7 @@ class BreederWorker:
         self.communication_callback = self._setup_communication()
 
         # Initialize detection coordinator
-        from engine.detection_coordinator import DetectionCoordinator
+        from f.breeder.engine.detection_coordinator import DetectionCoordinator
         self._detection_coordinator = DetectionCoordinator(
             breeder_id=self.breeder_id,
             config=self.config,
