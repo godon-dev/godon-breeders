@@ -97,6 +97,15 @@ class BreederWorker:
         self.study = self._load_or_create_study()
         self.communication_callback = self._setup_communication()
 
+        # Initialize detection coordinator
+        from engine.detection_coordinator import DetectionCoordinator
+        self._detection_coordinator = DetectionCoordinator(
+            breeder_id=self.breeder_id,
+            config=self.config,
+            shared_db_fn=self._with_shared_db,
+            collect_upper_bounds_fn=self._collect_upper_bounds,
+        )
+
         self.run_id = config.get('run_id', 0)
         self.target_id = config.get('target_id', 0)
 
@@ -133,12 +142,7 @@ class BreederWorker:
         self._wm_corrected_params = None
         self._watermark_baseline = self._compute_baseline_params(settings)
 
-        # Calibrated detection params — populated via AIMD on first use
-        self._calibrated_impulse_params = None
-        self._calibrated_hold_params = None
-        self._impulse_scale = 1.0
-        self._impulse_base_params = None
-        self._impulse_trials_in_round = 0
+        # Detection coordinator — initialized in __init__
 
         self._update_state()
 
@@ -356,29 +360,24 @@ class BreederWorker:
             return False
 
     def _get_detection_mode(self) -> str:
-        """Check detection_rounds table and return mode for this breeder.
-        
-        Returns: 'optimize' | 'hold' | 'impulse'
+        """Single source of truth for detection mode.
+
+        State machine:
+        - No active rounds → 'optimize' (warmup or between rounds)
+        - Own active round → 'impulse' (sender)
+        - Other's active round → 'hold' (receiver)
         """
         def op(conn):
             cur = conn.cursor()
-            # Check if THIS breeder has an active round (is sender)
             cur.execute(
-                "SELECT round_id FROM detection_rounds WHERE status = 'active' AND sender_id = %s LIMIT 1",
-                (self.breeder_id,)
-            )
-            row = cur.fetchone()
-            if row:
-                cur.close()
-                return 'impulse'
-            # Otherwise check if anyone else is sending
-            cur.execute(
-                "SELECT sender_id FROM detection_rounds WHERE status = 'active' LIMIT 1"
+                "SELECT sender_id FROM detection_rounds WHERE status = 'active' ORDER BY round_id ASC LIMIT 1"
             )
             row = cur.fetchone()
             cur.close()
             if row is None:
                 return 'optimize'
+            if row[0] == self.breeder_id:
+                return 'impulse'
             return 'hold'
         try:
             return self._with_shared_db(op, "get_detection_mode")
@@ -386,23 +385,63 @@ class BreederWorker:
             logger.warning(f"Failed to read detection mode: {e}")
             return 'optimize'
 
-    def _cleanup_stale_rounds(self):
-        """Complete all active rounds at detection start to reset coordination.
-        Called once when warmup completes, before the first detection round."""
-        def op(conn):
-            cur = conn.cursor()
-            cur.execute(
-                "UPDATE detection_rounds SET status = 'completed', completed_at = NOW() WHERE status = 'active'"
-            )
-            cur.close()
-        try:
-            self._with_shared_db(op, "cleanup_stale_rounds")
-            logger.info("Cleaned up stale controller-created rounds")
-        except Exception as e:
-            logger.warning(f"Failed to cleanup stale rounds: {e}")
+    def _init_detection_if_ready(self, has_warmup: bool, current_mode: str) -> str:
+        """Manage detection lifecycle: cleanup, start rounds, yield turns.
+
+        Returns the (possibly updated) detection mode for this trial.
+        Called once per trial before mode-specific param generation.
+        """
+        if not has_warmup:
+            return current_mode
+
+        # First time entering detection: clean up stale controller rounds
+        if not getattr(self, '_detection_initialized', False):
+            def cleanup(conn):
+                cur = conn.cursor()
+                cur.execute("UPDATE detection_rounds SET status = 'completed', completed_at = NOW() WHERE status = 'active'")
+                cur.close()
+            try:
+                self._with_shared_db(cleanup, "cleanup_stale_rounds")
+                self._detection_initialized = True
+                logger.info("Detection initialized — cleaned stale rounds")
+            except Exception as e:
+                logger.warning(f"Failed to init detection: {e}")
+            return 'optimize'
+
+        # If no active rounds, try to start one (but yield to other breeders)
+        if current_mode == 'optimize':
+            def try_start(conn):
+                cur = conn.cursor()
+                # Check no active rounds
+                cur.execute("SELECT count(*) FROM detection_rounds WHERE status = 'active'")
+                if cur.fetchone()[0] > 0:
+                    cur.close()
+                    return False
+                # Don't grab if we were most recent sender
+                cur.execute("SELECT sender_id FROM detection_rounds ORDER BY round_id DESC LIMIT 1")
+                row = cur.fetchone()
+                if row and row[0] == self.breeder_id:
+                    cur.close()
+                    return False
+                cur.execute("INSERT INTO detection_rounds (sender_id) VALUES (%s)", (self.breeder_id,))
+                cur.close()
+                return True
+            try:
+                started = self._with_shared_db(try_start, "start_detection_round")
+                if started:
+                    logger.info("Started new detection round as sender")
+                    self._impulse_trials_in_round = 0
+                    self._calibrated_impulse_params = None
+                    self._impulse_scale = 1.0
+                    # Re-evaluate mode
+                    return self._get_detection_mode()
+            except Exception as e:
+                logger.warning(f"Failed to start round: {e}")
+
+        return current_mode
 
     def _complete_detection_round(self):
-        """Mark the current active round as completed, then start a new one."""
+        """Complete own active round."""
         def op(conn):
             cur = conn.cursor()
             cur.execute(
@@ -417,39 +456,8 @@ class BreederWorker:
         except Exception as e:
             logger.warning(f"Failed to complete detection round: {e}")
 
-    def _start_new_detection_round(self):
-        """Insert a new active round for this breeder if no other rounds are active
-        AND this breeder wasn't the most recent sender. Ensures alternating turns."""
-        def check_and_insert(conn):
-            cur = conn.cursor()
-            cur.execute("SELECT count(*) FROM detection_rounds WHERE status = 'active'")
-            active_count = cur.fetchone()[0]
-            if active_count > 0:
-                cur.close()
-                return False
-            # Don't start if we were the most recent sender — yield to others
-            cur.execute("SELECT sender_id FROM detection_rounds ORDER BY round_id DESC LIMIT 1")
-            row = cur.fetchone()
-            if row and row[0] == self.breeder_id:
-                cur.close()
-                return False
-            cur.execute(
-                "INSERT INTO detection_rounds (sender_id) VALUES (%s)",
-                (self.breeder_id,)
-            )
-            cur.close()
-            return True
-        try:
-            started = self._with_shared_db(check_and_insert, "start_new_detection_round")
-            if started:
-                logger.info("Started new detection round as sender")
-            else:
-                logger.info("Deferring new round — other active rounds exist")
-        except Exception as e:
-            logger.warning(f"Failed to start new detection round: {e}")
-
     def _flag_receiver_violation(self):
-        """Receiver flags the sender's active round that it broke guardrails."""
+        """Receiver flags sender's round on guardrail violation."""
         def op(conn):
             cur = conn.cursor()
             cur.execute(
@@ -460,13 +468,11 @@ class BreederWorker:
             cur.close()
         try:
             self._with_shared_db(op, "flag_receiver_violation")
-            logger.info("Flagged receiver guardrail violation to sender")
         except Exception as e:
             logger.warning(f"Failed to flag receiver violation: {e}")
 
-    def _check_receiver_violation(self):
-        """Sender checks if receiver flagged a violation on its active round.
-        Returns True if receiver broke guardrails during this round."""
+    def _check_receiver_violation(self) -> bool:
+        """Sender checks if receiver flagged violation."""
         def op(conn):
             cur = conn.cursor()
             cur.execute(
@@ -484,7 +490,7 @@ class BreederWorker:
             return False
 
     def _clear_receiver_violation(self):
-        """Sender resets the receiver violation flag after processing AIMD backoff."""
+        """Sender clears receiver violation flag after processing."""
         def op(conn):
             cur = conn.cursor()
             cur.execute(
@@ -1231,46 +1237,15 @@ class BreederWorker:
                 params = None
 
                 try:
-                    # Check detection mode — overrides normal sampling
-                    detection_mode = self._get_detection_mode()
+                    # === Detection Coordinator (clean state machine) ===
+                    decision = self._detection_coordinator.decide_trial(trial, self.study)
+                    detection_mode = decision['mode']
 
-                    # Warmup gate: need at least N COMPLETE trials before detection
-                    warmup_target = self.config.get('detection', {}).get('warmup_trials', 15)
-                    complete_count = sum(1 for t in self.study.trials if t.state == TrialState.COMPLETE) if self.study and self.study.trials else 0
-                    has_warmup = complete_count >= warmup_target
-
-                    # If warmup passed and no active rounds, clean up stale controller rounds and start fresh
-                    if has_warmup and detection_mode in ('hold', 'impulse'):
-                        # First time entering detection — clean up controller-created rounds
-                        if not getattr(self, '_detection_initialized', False):
-                            self._cleanup_stale_rounds()
-                            self._detection_initialized = True
-                            detection_mode = 'optimize'  # Will start fresh next trial
-
-                    # If warmup passed and no active rounds, start one
-                    if has_warmup and detection_mode == 'optimize':
-                        self._start_new_detection_round()
-                        detection_mode = self._get_detection_mode()
-
-                    if detection_mode == 'hold' and has_warmup:
-                        logger.info(f"Trial {trial.number}: DETECTION HOLD mode")
-                        params = self._get_calibrated_hold_params()
-                        if not params:
-                            logger.warning("No calibrated hold params yet, optimizing normally")
-                            detection_mode = None  # Fall through to optimize
-                        else:
-                            trial.set_user_attr('detection_mode', 'hold')
-
-                    elif detection_mode == 'impulse' and has_warmup:
-                        params = self._get_calibrated_impulse_params()
-                        if not params:
-                            logger.warning("No calibrated impulse params yet, optimizing normally")
-                            detection_mode = None  # Fall through to optimize
-                        else:
-                            trial.set_user_attr('detection_mode', 'impulse')
-                            # Tag ping vs listen phase for matched filter detection
-                            is_ping = self._impulse_trials_in_round % 2 == 0
-                            trial.set_user_attr('impulse_phase', 'ping' if is_ping else 'listen')
+                    if decision.get('params'):
+                        params = decision['params']
+                        trial.set_user_attr('detection_mode', detection_mode)
+                        if decision.get('impulse_phase'):
+                            trial.set_user_attr('impulse_phase', decision['impulse_phase'])
 
                     if not params:
                         params = self.strain.suggest_params(trial, self.config.get('settings', {}))
@@ -1343,19 +1318,15 @@ class BreederWorker:
                         )
                         logger.info(f"Trial {trial.number} marked as FAILED (guardrail violation)")
 
-                        # Receiver flags violation so sender can scale down
-                        if detection_mode == 'hold':
-                            self._flag_receiver_violation()
-
                         for violation_msg in violations:
                             guardrail_name = violation_msg.split(':')[0] if ':' in violation_msg else 'unknown'
                             self.metrics.inc_guardrail_violation(guardrail_name)
 
                         self._handle_guardrail_violation(params)
 
-                        # AIMD backoff on impulse guardrail violation — find survivable impulse scale
-                        if detection_mode == 'impulse':
-                            self._impulse_aimd_backoff()
+                        # Notify coordinator of failure — triggers AIMD if in ping phase
+                        if self._detection_coordinator:
+                            self._detection_coordinator.on_guardrail_fail(params)
 
                         self.metrics.inc_trial('failed')
                         self.metrics.inc_effectuation('failure')
@@ -1408,24 +1379,6 @@ class BreederWorker:
                             self.metrics.set_best_value(values[0] if values else 0)
 
                         self._handle_successful_trial(params)
-
-                        # Complete detection round after configured number of impulses
-                        if detection_mode == 'impulse':
-                            self._impulse_trials_in_round += 1
-                            impulse_target = self.config.get('detection', {}).get('impulse_trials_per_round', 10)
-
-                            # Check if receiver flagged a violation — scale down if so
-                            if self._check_receiver_violation():
-                                logger.info(f"Receiver flagged violation during round — AIMD backoff")
-                                self._impulse_aimd_backoff()
-                                self._impulse_trials_in_round = 0  # Don't count toward completion
-                                # Reset the flag so next impulse gets a clean check
-                                self._clear_receiver_violation()
-
-                            if self._impulse_trials_in_round >= impulse_target:
-                                self._complete_detection_round()
-                                self._start_new_detection_round()
-                                self._impulse_trials_in_round = 0
 
                         if self.communication_callback:
                             frozen_trial = self.study.trials[-1]
