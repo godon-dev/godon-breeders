@@ -439,9 +439,13 @@ class TestRunLoop:
         mock_comm = MagicMock()
         worker.communication_callback = mock_comm
 
+        # Mock the detection coordinator to return optimize mode with no params
+        worker._detection_coordinator.decide_trial.return_value = {
+            'mode': 'optimize', 'params': None
+        }
+
         with patch.object(worker, '_execute_trial', return_value={'throughput': 42.5}), \
              patch.object(worker, '_check_guardrails', return_value=(False, [])), \
-             patch.object(worker, '_get_detection_mode', return_value='optimize'), \
              patch.object(worker, 'metrics'):
             worker.run()
 
