@@ -208,10 +208,27 @@ class DetectionCoordinator:
         if best_trial_params:
             self._baseline_params = json.loads(best_trial_params) \
                 if isinstance(best_trial_params, str) else dict(best_trial_params)
-            # Invalidate cached impulse params so they regenerate from new baseline
             self._impulse_params = None
             self._impulse_base_params = None
             logger.info(f"Refreshed baseline params (best value: {best_value:.4f})")
+        else:
+            # Fallback: use raw trial params from best trial if no stashed params
+            best_raw = None
+            best_raw_value = None
+            for trial in study.trials:
+                if trial.state != TrialState.COMPLETE:
+                    continue
+                if not trial.values:
+                    continue
+                v = trial.values[0]
+                if best_raw_value is None or (minimize and v < best_raw_value) or (not minimize and v > best_raw_value):
+                    best_raw_value = v
+                    best_raw = trial
+            if best_raw and best_raw.params:
+                self._baseline_params = dict(best_raw.params)
+                self._impulse_params = None
+                self._impulse_base_params = None
+                logger.info(f"Refreshed baseline from raw trial params (best value: {best_raw_value:.4f}, no stashed params found)")
 
     def _get_impulse_params(self) -> Optional[Dict[str, Any]]:
         """Generate extreme params from current baseline.
@@ -281,7 +298,16 @@ class DetectionCoordinator:
                 if study and study.trials else 0
             if complete >= self.warmup_target:
                 self._refresh_baseline(study)
-                if self._try_start_round():
+                if self._baseline_params is None:
+                    # Not enough stashed effectuation_params yet — keep optimizing
+                    # until we have a usable baseline. Never enter hold/impulse
+                    # without a real baseline, otherwise hold falls through to
+                    # random optimization (the "wiggle" bug).
+                    logger.warning(
+                        f"Warmup has {complete} complete trials but no stashed "
+                        f"effectuation_params — staying in WARMUP"
+                    )
+                elif self._try_start_round():
                     self.state = self.SENDER_PING
                     self._ping_count = 0
                     logger.info("Warmup complete — becoming SENDER")
@@ -289,8 +315,6 @@ class DetectionCoordinator:
                     self.state = self.RECEIVER_HOLD
                     logger.info("Warmup complete — becoming RECEIVER (other sender active)")
                 else:
-                    # No active rounds, couldn't start (was recent sender?) — stay warmup
-                    # This shouldn't happen after cleanup, but handle gracefully
                     pass
             return {'mode': 'optimize', 'params': None}
 
@@ -304,6 +328,8 @@ class DetectionCoordinator:
             return {'mode': 'impulse', 'params': params, 'impulse_phase': 'ping'}
 
         if self.state == self.SENDER_LISTEN:
+            if self._baseline_params is None:
+                self._refresh_baseline(study)
             params = dict(self._baseline_params) if self._baseline_params else None
             if self._ping_count >= self.impulses_per_round:
                 self.state = self.SENDER_DONE
@@ -327,29 +353,26 @@ class DetectionCoordinator:
                 self._recover_count = 0
                 self.state = self.RECOVER
                 logger.info("Sender finished — entering RECOVER")
-            else:
-                # Ensure we have baseline params — refresh if missing.
-                # Without this, hold mode returns params=None, which causes
-                # the breeder to fall through to random optimization (the
-                # "hold wiggle" bug).
-                if self._baseline_params is None:
-                    self._refresh_baseline(study)
-                if self._baseline_params is not None:
-                    params = dict(self._baseline_params)
-                    return {'mode': 'hold', 'params': params}
-                else:
-                    # Still no baseline — can't hold properly.
-                    # Optimize this trial to build up stashed params.
-                    logger.warning("RECEIVER_HOLD but no baseline params — optimizing to accumulate trials")
-                    return {'mode': 'optimize', 'params': None}
-            # Fall through to RECOVER on next trial
-            return {'mode': 'optimize', 'params': None}
+                return {'mode': 'optimize', 'params': None}
+            
+            if self._baseline_params is None:
+                # Lost baseline (shouldn't happen after warmup fix, but guard anyway)
+                logger.warning("RECEIVER_HOLD with no baseline — entering RECOVER")
+                self._recover_count = 0
+                self.state = self.RECOVER
+                return {'mode': 'optimize', 'params': None}
+            
+            params = dict(self._baseline_params)
+            return {'mode': 'hold', 'params': params}
 
         if self.state == self.RECOVER:
             self._recover_count += 1
             if self._recover_count >= self.recover_trials:
                 self._refresh_baseline(study)
-                if self._try_start_round():
+                if self._baseline_params is None:
+                    logger.warning("RECOVER finished but no baseline — staying in RECOVER")
+                    self._recover_count = 0
+                elif self._try_start_round():
                     self.state = self.SENDER_PING
                     self._ping_count = 0
                     logger.info("Recover complete — becoming SENDER")
@@ -357,7 +380,6 @@ class DetectionCoordinator:
                     self.state = self.RECEIVER_HOLD
                     logger.info("Recover complete — becoming RECEIVER")
                 else:
-                    # Nobody is sender and we can't start — retry next trial
                     self._recover_count = 0
             return {'mode': 'optimize', 'params': None}
 
