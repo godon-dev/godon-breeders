@@ -330,12 +330,14 @@ class DetectionCoordinator:
         if self.state == self.SENDER_LISTEN:
             if self._baseline_params is None:
                 self._refresh_baseline(study)
-            params = dict(self._baseline_params) if self._baseline_params else None
+            if self._baseline_params is None:
+                logger.warning("SENDER_LISTEN but no baseline params — skipping listen trial")
+                return {'mode': 'optimize', 'params': None}
             if self._ping_count >= self.impulses_per_round:
                 self.state = self.SENDER_DONE
             else:
                 self.state = self.SENDER_PING
-            return {'mode': 'impulse', 'params': params, 'impulse_phase': 'listen'}
+            return {'mode': 'impulse', 'params': dict(self._baseline_params), 'impulse_phase': 'listen'}
 
         if self.state == self.SENDER_DONE:
             self._complete_my_round()
@@ -354,14 +356,14 @@ class DetectionCoordinator:
                 self.state = self.RECOVER
                 logger.info("Sender finished — entering RECOVER")
                 return {'mode': 'optimize', 'params': None}
-            
+            # Receiver must hold — but if we have no baseline params yet,
+            # try to refresh from recent trials. If still None, we are not
+            # ready to hold: optimize this trial so we have a baseline next time.
             if self._baseline_params is None:
-                # Lost baseline (shouldn't happen after warmup fix, but guard anyway)
-                logger.warning("RECEIVER_HOLD with no baseline — entering RECOVER")
-                self._recover_count = 0
-                self.state = self.RECOVER
+                self._refresh_baseline(study)
+            if self._baseline_params is None:
+                logger.warning("RECEIVER_HOLD with no baseline — optimizing this trial")
                 return {'mode': 'optimize', 'params': None}
-            
             params = dict(self._baseline_params)
             return {'mode': 'hold', 'params': params}
 

@@ -1241,11 +1241,44 @@ class BreederWorker:
                     decision = self._detection_coordinator.decide_trial(trial, self.study)
                     detection_mode = decision['mode']
 
+                    # ALWAYS tag detection_mode on the trial — even if params
+                    # are None. Without this, hold trials with no baseline
+                    # params are indistinguishable from optimize trials.
+                    trial.set_user_attr('detection_mode', detection_mode)
+                    if decision.get('impulse_phase'):
+                        trial.set_user_attr('impulse_phase', decision['impulse_phase'])
+
+                    if decision.get('skip'):
+                        # Coordinator says skip — no baseline params available.
+                        # Mark trial as FAIL rather than running random params
+                        # that would contaminate the hold baseline.
+                        logger.warning(f"Trial {trial.number} skipped — {detection_mode} mode has no params")
+                        self._retry_op(
+                            lambda: self.study.tell(trial, state=TrialState.FAIL),
+                            f"study.tell FAIL skip (trial {trial.number})"
+                        )
+                        continue
+
                     if decision.get('params'):
                         params = decision['params']
-                        trial.set_user_attr('detection_mode', detection_mode)
-                        if decision.get('impulse_phase'):
-                            trial.set_user_attr('impulse_phase', decision['impulse_phase'])
+                    elif detection_mode == 'hold':
+                        # Hold mode but coordinator returned no params (and didn't set skip).
+                        # Use the last successful trial's effectuation params
+                        # as a stable baseline instead of random optimization.
+                        fallback = self._get_last_successful_params()
+                        if fallback:
+                            params = fallback
+                            logger.info(f"Hold mode: using last successful params as fallback baseline")
+                        else:
+                            # No params at all — FAIL the trial, do NOT optimize randomly.
+                            # Random params during hold contaminate the baseline and
+                            # destroy the matched filter's ability to detect coupling.
+                            logger.error(f"Hold mode: no fallback params — FAILing trial to avoid baseline contamination")
+                            self._retry_op(
+                                lambda: self.study.tell(trial, state=TrialState.FAIL),
+                                f"study.tell FAIL no-params (trial {trial.number})"
+                            )
+                            continue
 
                     if not params:
                         params = self.strain.suggest_params(trial, self.config.get('settings', {}))
