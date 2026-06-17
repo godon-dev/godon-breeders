@@ -15,6 +15,27 @@ otel_mock.get_logger = lambda name: type('Logger', (), {
     'info': lambda *a, **kw: None, 'warning': lambda *a, **kw: None, 'error': lambda *a, **kw: None,
 })()
 sys.modules['f.breeder.shared.otel_logging'] = otel_mock
+
+# Mock Windmill package namespace for breeder_worker internal imports
+for mod_path in ['f', 'f.breeder', 'f.breeder.engine',
+                 'f.breeder.engine.detection_coordinator',
+                 'f.breeder.engine.breeder_metrics_client',
+                 'f.breeder.engine.communication',
+                 'f.breeder.engine.strain_loader',
+                 'f.breeder.engine.watermark']:
+    parts = mod_path.split('.')
+    parent = '.'.join(parts[:-1]) if len(parts) > 1 else None
+    mock_mod = types.ModuleType(mod_path)
+    if parent and parent in sys.modules:
+        setattr(sys.modules[parent], parts[-1], mock_mod)
+    sys.modules[mod_path] = mock_mod
+
+sys.modules['f.breeder.engine.detection_coordinator'].DetectionCoordinator = MagicMock
+sys.modules['f.breeder.engine.breeder_metrics_client'].BreederMetricsClient = MagicMock
+sys.modules['f.breeder.engine.communication'].CommunicationCallback = MagicMock
+sys.modules['f.breeder.engine.strain_loader'].load_strain = MagicMock(return_value=MagicMock())
+sys.modules['f.breeder.engine.watermark'].create_watermark = MagicMock(return_value=None)
+sys.modules['f.breeder.engine.watermark'].Watermark = MagicMock
 wmill_mock = types.ModuleType('wmill')
 wmill_mock.run_script_by_path = MagicMock()
 sys.modules['wmill'] = wmill_mock
