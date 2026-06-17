@@ -12,6 +12,25 @@ sys.modules['optuna.storages'] = MagicMock()
 sys.modules['optuna.trial'] = MagicMock()
 sys.modules['optuna.samplers'] = MagicMock()
 
+# Mock Windmill package namespace so breeder_worker's internal imports resolve
+sys.modules['f'] = MagicMock()
+sys.modules['f.breeder'] = MagicMock()
+sys.modules['f.breeder.engine'] = MagicMock()
+sys.modules['f.breeder.engine.detection_coordinator'] = MagicMock()
+sys.modules['f.breeder.engine.detection_coordinator'].DetectionCoordinator = MagicMock
+sys.modules['f.breeder.engine.breeder_metrics_client'] = MagicMock()
+sys.modules['f.breeder.engine.breeder_metrics_client'].BreederMetricsClient = MagicMock
+sys.modules['f.breeder.engine.communication'] = MagicMock()
+sys.modules['f.breeder.engine.communication'].CommunicationCallback = MagicMock
+sys.modules['f.breeder.engine.strain_loader'] = MagicMock()
+sys.modules['f.breeder.engine.strain_loader'].load_strain = MagicMock(return_value=MagicMock())
+sys.modules['f.breeder.engine.watermark'] = MagicMock()
+sys.modules['f.breeder.engine.watermark'].create_watermark = MagicMock(return_value=None)
+sys.modules['f.breeder.engine.watermark'].Watermark = MagicMock
+sys.modules['f.breeder.shared'] = MagicMock()
+sys.modules['f.breeder.shared.otel_logging'] = MagicMock()
+sys.modules['f.breeder.shared.otel_logging'].get_logger = MagicMock(return_value=MagicMock())
+
 from engine.breeder_worker import BreederWorker
 
 
