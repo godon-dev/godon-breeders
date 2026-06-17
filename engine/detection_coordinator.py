@@ -328,8 +328,20 @@ class DetectionCoordinator:
                 self.state = self.RECOVER
                 logger.info("Sender finished — entering RECOVER")
             else:
-                params = dict(self._baseline_params) if self._baseline_params else None
-                return {'mode': 'hold', 'params': params}
+                # Ensure we have baseline params — refresh if missing.
+                # Without this, hold mode returns params=None, which causes
+                # the breeder to fall through to random optimization (the
+                # "hold wiggle" bug).
+                if self._baseline_params is None:
+                    self._refresh_baseline(study)
+                if self._baseline_params is not None:
+                    params = dict(self._baseline_params)
+                    return {'mode': 'hold', 'params': params}
+                else:
+                    # Still no baseline — can't hold properly.
+                    # Optimize this trial to build up stashed params.
+                    logger.warning("RECEIVER_HOLD but no baseline params — optimizing to accumulate trials")
+                    return {'mode': 'optimize', 'params': None}
             # Fall through to RECOVER on next trial
             return {'mode': 'optimize', 'params': None}
 
