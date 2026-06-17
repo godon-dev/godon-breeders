@@ -78,9 +78,21 @@ class DetectionCoordinator:
         self._impulse_base_params = None  # Original baseline for AIMD re-scaling
 
     def _cleanup_stale_rounds(self):
-        """Complete all active rounds to reset coordination at startup."""
+        """Complete all active rounds to reset coordination at startup.
+        Also creates the detection_rounds table if it doesn't exist
+        (controller should have created it, but be defensive)."""
         def op(conn):
             cur = conn.cursor()
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS detection_rounds (
+                    round_id SERIAL PRIMARY KEY,
+                    sender_id VARCHAR(255) NOT NULL,
+                    status VARCHAR(50) DEFAULT 'active',
+                    receiver_violated BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    completed_at TIMESTAMPTZ
+                )
+            """)
             cur.execute(
                 "UPDATE detection_rounds SET status = 'completed', completed_at = NOW() "
                 "WHERE status = 'active'"
@@ -88,7 +100,7 @@ class DetectionCoordinator:
             cur.close()
         try:
             self._db(op, "cleanup_stale_rounds")
-            logger.info("Cleaned up stale detection rounds")
+            logger.info("Cleaned up stale detection rounds (table ensured)")
         except Exception as e:
             logger.warning(f"Failed to cleanup stale rounds: {e}")
 
