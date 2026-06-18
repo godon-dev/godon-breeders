@@ -300,8 +300,18 @@ class DetectionCoordinator:
             'params': dict or None (if None, breeder samples normally)
             'impulse_phase': 'ping' | 'listen' | None
         """
+        import os
+        debug = os.environ.get('GODON_DETECTION_DEBUG', '0') == '1'
+
+        def _log(msg):
+            if debug:
+                logger.info(f"[DEBUG] breeder={self.breeder_id[:8]} state={self.state} {msg}")
+                trial.set_user_attr('coord_state', self.state)
+                trial.set_user_attr('coord_debug', msg[:500])
+
         # First-time initialization
         if not self._initialized:
+            _log(f"first init — cleaning stale rounds")
             self._cleanup_stale_rounds()
             self._initialized = True
 
@@ -311,72 +321,65 @@ class DetectionCoordinator:
             if complete >= self.warmup_target:
                 self._refresh_baseline(study)
                 if self._baseline_params is None:
-                    # Not enough stashed effectuation_params yet — keep optimizing
-                    # until we have a usable baseline. Never enter hold/impulse
-                    # without a real baseline, otherwise hold falls through to
-                    # random optimization (the "wiggle" bug).
-                    logger.warning(
-                        f"Warmup has {complete} complete trials but no stashed "
-                        f"effectuation_params — staying in WARMUP"
-                    )
+                    _log(f"warmup: {complete} complete but no effectuation_params stashed — staying WARMUP")
                 elif self._try_start_round():
                     self.state = self.SENDER_PING
                     self._ping_count = 0
-                    logger.info("Warmup complete — becoming SENDER")
+                    _log(f"warmup done ({complete} trials) — became SENDER")
                 elif self._any_active_round():
                     self.state = self.RECEIVER_HOLD
-                    logger.info("Warmup complete — becoming RECEIVER (other sender active)")
+                    _log(f"warmup done ({complete} trials) — became RECEIVER")
                 else:
-                    pass
+                    _log(f"warmup: {complete} trials, no active round and couldn't start one — staying WARMUP")
+            else:
+                _log(f"warmup: {complete}/{self.warmup_target} complete trials")
             return {'mode': 'optimize', 'params': None}
 
         if self.state == self.SENDER_PING:
             params = self._get_impulse_params()
             if not params:
-                logger.warning("No impulse params — falling back to optimize")
+                _log("SENDER_PING: no impulse params — optimize fallback")
                 return {'mode': 'optimize', 'params': None}
             self._ping_count += 1
             self.state = self.SENDER_LISTEN
+            _log(f"SENDER_PING: ping #{self._ping_count}/{self.impulses_per_round}")
             return {'mode': 'impulse', 'params': params, 'impulse_phase': 'ping'}
 
         if self.state == self.SENDER_LISTEN:
             if self._baseline_params is None:
                 self._refresh_baseline(study)
             if self._baseline_params is None:
-                logger.warning("SENDER_LISTEN but no baseline params — skipping listen trial")
+                _log("SENDER_LISTEN: no baseline — optimize fallback")
                 return {'mode': 'optimize', 'params': None}
             if self._ping_count >= self.impulses_per_round:
                 self.state = self.SENDER_DONE
             else:
                 self.state = self.SENDER_PING
+            _log(f"SENDER_LISTEN: listen after ping #{self._ping_count}, next={'DONE' if self.state==self.SENDER_DONE else 'PING'}")
             return {'mode': 'impulse', 'params': dict(self._baseline_params), 'impulse_phase': 'listen'}
 
         if self.state == self.SENDER_DONE:
             self._complete_my_round()
             self._ping_count = 0
-            self._impulse_params = None  # Force regeneration next round
+            self._impulse_params = None
             self._recover_count = 0
             self.state = self.RECOVER
-            logger.info("Sender round complete — entering RECOVER")
+            _log("SENDER_DONE: round completed, entering RECOVER")
             return {'mode': 'optimize', 'params': None}
 
         if self.state == self.RECEIVER_HOLD:
-            # Check if sender still active
             if not self._any_active_round():
-                # Sender finished — recover then try to become sender
                 self._recover_count = 0
                 self.state = self.RECOVER
-                logger.info("Sender finished — entering RECOVER")
+                _log("RECEIVER_HOLD: sender finished — entering RECOVER")
                 return {'mode': 'optimize', 'params': None}
-            # Receiver must hold — but if we have no baseline params yet,
-            # try to refresh from recent trials. If still None, we are not
-            # ready to hold: optimize this trial so we have a baseline next time.
             if self._baseline_params is None:
                 self._refresh_baseline(study)
             if self._baseline_params is None:
-                logger.warning("RECEIVER_HOLD with no baseline — optimizing this trial")
+                _log("RECEIVER_HOLD: no baseline params — optimizing")
                 return {'mode': 'optimize', 'params': None}
             params = dict(self._baseline_params)
+            _log("RECEIVER_HOLD: holding with baseline params")
             return {'mode': 'hold', 'params': params}
 
         if self.state == self.RECOVER:
@@ -384,21 +387,23 @@ class DetectionCoordinator:
             if self._recover_count >= self.recover_trials:
                 self._refresh_baseline(study)
                 if self._baseline_params is None:
-                    logger.warning("RECOVER finished but no baseline — staying in RECOVER")
+                    _log(f"RECOVER: no baseline after {self._recover_count} trials — staying RECOVER")
                     self._recover_count = 0
                 elif self._try_start_round():
                     self.state = self.SENDER_PING
                     self._ping_count = 0
-                    logger.info("Recover complete — becoming SENDER")
+                    _log(f"RECOVER done ({self._recover_count} trials) — became SENDER")
                 elif self._any_active_round():
                     self.state = self.RECEIVER_HOLD
-                    logger.info("Recover complete — becoming RECEIVER")
+                    _log(f"RECOVER done ({self._recover_count} trials) — became RECEIVER")
                 else:
+                    _log(f"RECOVER: {self._recover_count} trials, no active round and couldn't start — staying RECOVER")
                     self._recover_count = 0
+            else:
+                _log(f"RECOVER: trial {self._recover_count}/{self.recover_trials}")
             return {'mode': 'optimize', 'params': None}
 
-        # Unknown state — safe fallback
-        logger.warning(f"Unknown detection state: {self.state} — resetting to WARMUP")
+        _log(f"UNKNOWN state {self.state} — resetting to WARMUP")
         self.state = self.WARMUP
         return {'mode': 'optimize', 'params': None}
 
