@@ -79,7 +79,8 @@ class TestWarmup:
         coord, _ = _create_coordinator()
         study = _mock_study(n_complete=1)  # Less than warmup_target=3
         trial = MagicMock()
-        decision = coord.decide_trial(trial, study)
+        with patch.object(coord, '_any_active_round', return_value=False):
+            decision = coord.decide_trial(trial, study)
         assert decision['mode'] == 'optimize'
         assert decision['params'] is None
         assert coord.state == DetectionCoordinator.WARMUP
@@ -89,7 +90,8 @@ class TestWarmup:
         study = _mock_study(n_complete=3)  # Equals warmup_target
         trial = MagicMock()
         # db returns True for try_start_round
-        decision = coord.decide_trial(trial, study)
+        with patch.object(coord, '_any_active_round', return_value=False):
+            decision = coord.decide_trial(trial, study)
         assert decision['mode'] == 'optimize'  # Last warmup trial
         assert coord.state == DetectionCoordinator.SENDER_PING
 
