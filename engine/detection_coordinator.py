@@ -78,12 +78,11 @@ class DetectionCoordinator:
         self._impulse_base_params = None  # Original baseline for AIMD re-scaling
 
     def _cleanup_stale_rounds(self):
-        """Complete stale active rounds older than 10 minutes to reset coordination.
+        """Reset coordination state.
 
-        Does NOT complete recent rounds — those belong to other workers that
-        are actively running detection. Only cleans up rounds that are clearly
-        abandoned (worker crashed, deployment restarted).
-        Also creates the detection_rounds table if it doesn't exist."""
+        First init: complete all active rounds NOT owned by this breeder.
+        This clears stale rounds from previous runs without killing our own
+        workers' active rounds. Subsequent calls: only clean rounds >10min old."""
         def op(conn):
             cur = conn.cursor()
             cur.execute("""
@@ -96,15 +95,25 @@ class DetectionCoordinator:
                     completed_at TIMESTAMPTZ
                 )
             """)
-            # Only complete rounds older than 10 minutes
-            cur.execute(
-                "UPDATE detection_rounds SET status = 'completed', completed_at = NOW() "
-                "WHERE status = 'active' AND created_at < NOW() - INTERVAL '10 minutes'"
-            )
+            if self._initialized:
+                # Subsequent init (multi-worker): only clean old rounds
+                cur.execute(
+                    "UPDATE detection_rounds SET status = 'completed', completed_at = NOW() "
+                    "WHERE status = 'active' AND created_at < NOW() - INTERVAL '10 minutes'"
+                )
+            else:
+                # First init: complete rounds from OTHER breeders (stale from
+                # previous runs) but preserve rounds owned by this breeder's
+                # workers (they may have already started sending).
+                cur.execute(
+                    "UPDATE detection_rounds SET status = 'completed', completed_at = NOW() "
+                    "WHERE status = 'active' AND sender_id != %s",
+                    (self.breeder_id,)
+                )
             cur.close()
         try:
             self._db(op, "cleanup_stale_rounds")
-            logger.info("Cleaned up stale detection rounds (>10min old)")
+            logger.info("Cleaned up stale detection rounds")
         except Exception as e:
             logger.warning(f"Failed to cleanup stale rounds: {e}")
 
