@@ -123,49 +123,60 @@ class DetectionCoordinator:
     def _try_start_round(self) -> bool:
         """Try to start a new detection round as sender.
 
-        Only starts if no other active rounds exist. Fair turn-taking:
-        yield to the other breeder, but only if they haven't had a chance
-        in the last 2 minutes (prevents deadlock when other breeder is stuck
-        in warmup or recover)."""
+        Uses a PostgreSQL advisory lock within a transaction to prevent
+        TOCTOU race: two workers both checking 'no active rounds' and both
+        inserting. The lock serializes the check+insert so only one wins."""
         def op(conn):
-            cur = conn.cursor()
-            # No active rounds allowed
-            cur.execute("SELECT count(*) FROM detection_rounds WHERE status = 'active'")
-            if cur.fetchone()[0] > 0:
+            # Need explicit transaction for advisory lock to work
+            old_autocommit = conn.autocommit
+            conn.autocommit = False
+            try:
+                cur = conn.cursor()
+                # Advisory lock: key 42 is the detection_rounds namespace.
+                # Non-blocking — if another worker holds it, we back off.
+                cur.execute("SELECT pg_try_advisory_xact_lock(42)")
+                if not cur.fetchone()[0]:
+                    conn.rollback()
+                    cur.close()
+                    return False
+                # No active rounds allowed
+                cur.execute("SELECT count(*) FROM detection_rounds WHERE status = 'active'")
+                if cur.fetchone()[0] > 0:
+                    conn.rollback()
+                    cur.close()
+                    return False
+                # Fair turn-taking: yield if we were the most recent sender
+                # (unless it was more than 2 minutes ago)
+                cur.execute(
+                    "SELECT sender_id, created_at FROM detection_rounds "
+                    "ORDER BY round_id DESC LIMIT 1"
+                )
+                row = cur.fetchone()
+                if row and row[0] == self.breeder_id:
+                    created_at = row[1]
+                    if created_at:
+                        cur.execute(
+                            "SELECT EXTRACT(EPOCH FROM (NOW() - %s))",
+                            (created_at,)
+                        )
+                        elapsed = cur.fetchone()[0]
+                        if elapsed < 120:
+                            conn.rollback()
+                            cur.close()
+                            return False
+                # Start our round
+                cur.execute(
+                    "INSERT INTO detection_rounds (sender_id) VALUES (%s)",
+                    (self.breeder_id,)
+                )
+                conn.commit()
                 cur.close()
-                return False
-            # Fair turn-taking: check if we were the most recent sender.
-            # If yes, yield — but only for 2 minutes. After that, the other
-            # breeder may be stuck (warmup, crash, etc) and we should proceed.
-            cur.execute(
-                "SELECT sender_id, created_at FROM detection_rounds "
-                "ORDER BY round_id DESC LIMIT 1"
-            )
-            row = cur.fetchone()
-            if row and row[0] == self.breeder_id:
-                # We were the most recent sender. Check how long ago.
-                created_at = row[1]
-                if created_at:
-                    cur.execute(
-                        "SELECT EXTRACT(EPOCH FROM (NOW() - %s))",
-                        (created_at,)
-                    )
-                    elapsed = cur.fetchone()[0]
-                    if elapsed < 120:
-                        # Less than 2 minutes — yield to other breeder
-                        cur.close()
-                        return False
-                    # More than 2 minutes — other breeder had its chance,
-                    # we can go again
-                    logger.info(f"Starting new round despite being last sender "
-                               f"(last was {elapsed:.0f}s ago)")
-            # Start our round
-            cur.execute(
-                "INSERT INTO detection_rounds (sender_id) VALUES (%s)",
-                (self.breeder_id,)
-            )
-            cur.close()
-            return True
+                return True
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.autocommit = old_autocommit
         try:
             return self._db(op, "try_start_round")
         except Exception as e:
