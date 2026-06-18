@@ -102,13 +102,16 @@ class DetectionCoordinator:
                     "WHERE status = 'active' AND created_at < NOW() - INTERVAL '10 minutes'"
                 )
             else:
-                # First init: complete rounds from OTHER breeders (stale from
-                # previous runs) but preserve rounds owned by this breeder's
-                # workers (they may have already started sending).
+                # First init: complete ALL active rounds.
+                # This is a fresh start — stale rounds from previous bench runs
+                # persist in YugaByte across restacks. Multi-worker race is
+                # acceptable here: if worker A already started a round, worker B's
+                # cleanup completes it, A's SENDER_PING fails, A re-enters WARMUP,
+                # and starts a new round on the next trial. The cost is 1 lost
+                # impulse trial, not an infinite deadlock.
                 cur.execute(
                     "UPDATE detection_rounds SET status = 'completed', completed_at = NOW() "
-                    "WHERE status = 'active' AND sender_id != %s",
-                    (self.breeder_id,)
+                    "WHERE status = 'active'"
                 )
             cur.close()
         try:
