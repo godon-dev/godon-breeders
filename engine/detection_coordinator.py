@@ -124,30 +124,27 @@ class DetectionCoordinator:
     def _try_start_round(self) -> bool:
         """Try to start a new detection round as sender.
 
-        Uses a PostgreSQL advisory lock within a transaction to prevent
-        TOCTOU race: two workers both checking 'no active rounds' and both
-        inserting. The lock serializes the check+insert so only one wins."""
+        Uses a unique partial index to prevent TOCTOU race at the DB level.
+        Only one active round can exist at a time — the second INSERT fails
+        with a constraint violation."""
         def op(conn):
-            # Need explicit transaction for advisory lock to work
             old_autocommit = conn.autocommit
             conn.autocommit = False
             try:
                 cur = conn.cursor()
-                # Advisory lock: key 42 is the detection_rounds namespace.
-                # Non-blocking — if another worker holds it, we back off.
-                cur.execute("SELECT pg_try_advisory_xact_lock(42)")
-                if not cur.fetchone()[0]:
-                    conn.rollback()
-                    cur.close()
-                    return False
+                # Ensure the unique partial index exists (only one active row allowed)
+                cur.execute("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS detection_rounds_one_active
+                    ON detection_rounds ((1))
+                    WHERE status = 'active'
+                """)
                 # No active rounds allowed
                 cur.execute("SELECT count(*) FROM detection_rounds WHERE status = 'active'")
                 if cur.fetchone()[0] > 0:
                     conn.rollback()
                     cur.close()
                     return False
-                # Fair turn-taking: yield if we were the most recent sender
-                # (unless it was more than 2 minutes ago)
+                # Fair turn-taking: yield if we were most recent sender (within 2min)
                 cur.execute(
                     "SELECT sender_id, created_at FROM detection_rounds "
                     "ORDER BY round_id DESC LIMIT 1"
@@ -156,26 +153,21 @@ class DetectionCoordinator:
                 if row and row[0] == self.breeder_id:
                     created_at = row[1]
                     if created_at:
-                        cur.execute(
-                            "SELECT EXTRACT(EPOCH FROM (NOW() - %s))",
-                            (created_at,)
-                        )
+                        cur.execute("SELECT EXTRACT(EPOCH FROM (NOW() - %s))", (created_at,))
                         elapsed = cur.fetchone()[0]
                         if elapsed < 120:
                             conn.rollback()
                             cur.close()
                             return False
-                # Start our round
-                cur.execute(
-                    "INSERT INTO detection_rounds (sender_id) VALUES (%s)",
-                    (self.breeder_id,)
-                )
+                # Insert — unique index ensures only one active round survives
+                cur.execute("INSERT INTO detection_rounds (sender_id) VALUES (%s)", (self.breeder_id,))
                 conn.commit()
                 cur.close()
                 return True
             except Exception:
+                # Constraint violation — another breeder inserted first
                 conn.rollback()
-                raise
+                return False
             finally:
                 conn.autocommit = old_autocommit
         try:
