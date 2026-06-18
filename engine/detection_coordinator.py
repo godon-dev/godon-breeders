@@ -56,6 +56,7 @@ class DetectionCoordinator:
         self.config = config
         self._db = shared_db_fn  # _with_shared_db callback
         self._collect_upper_bounds = collect_upper_bounds_fn
+        self._breeder_db_name = f"breeder_{breeder_id.replace('-', '_')}"
 
         # Config
         det_cfg = config.get('detection', {})
@@ -339,6 +340,32 @@ class DetectionCoordinator:
         else:
             self._impulse_params = None
 
+    def _count_complete_trials_db(self) -> int:
+        """Count COMPLETE trials from the breeder's DB.
+
+        study.trials is cached locally per worker and doesn't see trials
+        from other parallel workers. This queries the actual DB for the
+        true count."""
+        import os
+        try:
+            import psycopg2
+            user = os.environ.get('GODON_ARCHIVE_DB_USER', 'yugabyte')
+            pw = os.environ.get('GODON_ARCHIVE_DB_PASSWORD', 'yugabyte')
+            host = os.environ.get('GODON_ARCHIVE_DB_SERVICE_HOST', 'localhost')
+            port = os.environ.get('GODON_ARCHIVE_DB_SERVICE_PORT', '5433')
+            conn = psycopg2.connect(
+                f"host={host} port={port} user={user} password={pw} dbname={self._breeder_db_name}"
+            )
+            cur = conn.cursor()
+            cur.execute("SELECT count(*) FROM trials WHERE state = 1")
+            count = cur.fetchone()[0]
+            cur.close()
+            conn.close()
+            return count
+        except Exception as e:
+            logger.warning(f"DB trial count failed: {e}, falling back to study.trials")
+            return -1
+
     def decide_trial(self, trial, study) -> Dict[str, Any]:
         """Main entry point. Called once per trial.
         Returns dict with:
@@ -373,8 +400,11 @@ class DetectionCoordinator:
                 _log(f"warmup interrupted — became RECEIVER (other breeder active)")
                 return {'mode': 'hold', 'params': dict(self._baseline_params)}
 
-            complete = sum(1 for t in study.trials if t.state == TrialState.COMPLETE) \
-                if study and study.trials else 0
+            complete = self._count_complete_trials_db()
+            if complete < 0:
+                # Fallback to study.trials if DB query failed
+                complete = sum(1 for t in study.trials if t.state == TrialState.COMPLETE) \
+                    if study and study.trials else 0
             if complete >= self.warmup_target:
                 self._refresh_baseline(study)
                 if self._baseline_params is None:
