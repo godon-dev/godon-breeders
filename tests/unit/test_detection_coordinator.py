@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
 # Mock heavy imports
 sys.modules['wmill'] = MagicMock()
+sys.modules['psycopg2'] = MagicMock()
 sys.modules['optuna'] = MagicMock()
 sys.modules['optuna.storages'] = MagicMock()
 sys.modules['optuna.trial'] = MagicMock()
@@ -79,7 +80,8 @@ class TestWarmup:
         coord, _ = _create_coordinator()
         study = _mock_study(n_complete=1)  # Less than warmup_target=3
         trial = MagicMock()
-        with patch.object(coord, '_any_active_round', return_value=False):
+        with patch.object(coord, '_any_active_round', return_value=False), \
+             patch.object(coord, '_count_complete_trials_db', return_value=-1):
             decision = coord.decide_trial(trial, study)
         assert decision['mode'] == 'optimize'
         assert decision['params'] is None
@@ -90,7 +92,8 @@ class TestWarmup:
         study = _mock_study(n_complete=3)  # Equals warmup_target
         trial = MagicMock()
         # db returns True for try_start_round
-        with patch.object(coord, '_any_active_round', return_value=False):
+        with patch.object(coord, '_any_active_round', return_value=False), \
+             patch.object(coord, '_count_complete_trials_db', return_value=-1):
             decision = coord.decide_trial(trial, study)
         assert decision['mode'] == 'optimize'  # Last warmup trial
         assert coord.state == DetectionCoordinator.SENDER_PING
@@ -237,6 +240,8 @@ class TestStateCleanup:
         coord, db = _create_coordinator()
         trial = MagicMock()
         study = _mock_study(n_complete=0)
-        coord.decide_trial(trial, study)
+        with patch.object(coord, '_any_active_round', return_value=False), \
+             patch.object(coord, '_count_complete_trials_db', return_value=-1):
+            coord.decide_trial(trial, study)
         # Should have called db at least once for cleanup
         assert db.call_count >= 1
