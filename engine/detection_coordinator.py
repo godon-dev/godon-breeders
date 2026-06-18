@@ -78,9 +78,12 @@ class DetectionCoordinator:
         self._impulse_base_params = None  # Original baseline for AIMD re-scaling
 
     def _cleanup_stale_rounds(self):
-        """Complete all active rounds to reset coordination at startup.
-        Also creates the detection_rounds table if it doesn't exist
-        (controller should have created it, but be defensive)."""
+        """Complete stale active rounds older than 10 minutes to reset coordination.
+
+        Does NOT complete recent rounds — those belong to other workers that
+        are actively running detection. Only cleans up rounds that are clearly
+        abandoned (worker crashed, deployment restarted).
+        Also creates the detection_rounds table if it doesn't exist."""
         def op(conn):
             cur = conn.cursor()
             cur.execute("""
@@ -93,21 +96,25 @@ class DetectionCoordinator:
                     completed_at TIMESTAMPTZ
                 )
             """)
+            # Only complete rounds older than 10 minutes
             cur.execute(
                 "UPDATE detection_rounds SET status = 'completed', completed_at = NOW() "
-                "WHERE status = 'active'"
+                "WHERE status = 'active' AND created_at < NOW() - INTERVAL '10 minutes'"
             )
             cur.close()
         try:
             self._db(op, "cleanup_stale_rounds")
-            logger.info("Cleaned up stale detection rounds (table ensured)")
+            logger.info("Cleaned up stale detection rounds (>10min old)")
         except Exception as e:
             logger.warning(f"Failed to cleanup stale rounds: {e}")
 
     def _try_start_round(self) -> bool:
         """Try to start a new detection round as sender.
-        Only starts if no other active rounds exist AND this breeder
-        wasn't the most recent sender (fair turn-taking)."""
+
+        Only starts if no other active rounds exist. Fair turn-taking:
+        yield to the other breeder, but only if they haven't had a chance
+        in the last 2 minutes (prevents deadlock when other breeder is stuck
+        in warmup or recover)."""
         def op(conn):
             cur = conn.cursor()
             # No active rounds allowed
@@ -115,15 +122,31 @@ class DetectionCoordinator:
             if cur.fetchone()[0] > 0:
                 cur.close()
                 return False
-            # Don't start if we were the most recent sender
+            # Fair turn-taking: check if we were the most recent sender.
+            # If yes, yield — but only for 2 minutes. After that, the other
+            # breeder may be stuck (warmup, crash, etc) and we should proceed.
             cur.execute(
-                "SELECT sender_id FROM detection_rounds "
+                "SELECT sender_id, created_at FROM detection_rounds "
                 "ORDER BY round_id DESC LIMIT 1"
             )
             row = cur.fetchone()
             if row and row[0] == self.breeder_id:
-                cur.close()
-                return False
+                # We were the most recent sender. Check how long ago.
+                created_at = row[1]
+                if created_at:
+                    cur.execute(
+                        "SELECT EXTRACT(EPOCH FROM (NOW() - %s))",
+                        (created_at,)
+                    )
+                    elapsed = cur.fetchone()[0]
+                    if elapsed < 120:
+                        # Less than 2 minutes — yield to other breeder
+                        cur.close()
+                        return False
+                    # More than 2 minutes — other breeder had its chance,
+                    # we can go again
+                    logger.info(f"Starting new round despite being last sender "
+                               f"(last was {elapsed:.0f}s ago)")
             # Start our round
             cur.execute(
                 "INSERT INTO detection_rounds (sender_id) VALUES (%s)",
@@ -316,6 +339,17 @@ class DetectionCoordinator:
             self._initialized = True
 
         if self.state == self.WARMUP:
+            # Even during warmup, check if another breeder started a round.
+            # If they did, become receiver immediately — our optimize trials
+            # are contaminating their measurement window.
+            if self._any_active_round() and self._baseline_params is None:
+                # Try to get a baseline from whatever trials we have
+                self._refresh_baseline(study)
+            if self._any_active_round() and self._baseline_params is not None:
+                self.state = self.RECEIVER_HOLD
+                _log(f"warmup interrupted — became RECEIVER (other breeder active)")
+                return {'mode': 'hold', 'params': dict(self._baseline_params)}
+
             complete = sum(1 for t in study.trials if t.state == TrialState.COMPLETE) \
                 if study and study.trials else 0
             if complete >= self.warmup_target:
