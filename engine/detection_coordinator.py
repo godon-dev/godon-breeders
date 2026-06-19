@@ -365,7 +365,7 @@ class DetectionCoordinator:
                 f"host={host} port={port} user={user} password={pw} dbname={self._breeder_db_name}"
             )
             cur = conn.cursor()
-            cur.execute("SELECT count(*) FROM trials WHERE state = 1")
+            cur.execute("SELECT count(*) FROM trials WHERE state = 'COMPLETE'")
             count = cur.fetchone()[0]
             cur.close()
             conn.close()
