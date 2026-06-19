@@ -350,6 +350,33 @@ class DetectionCoordinator:
         else:
             self._impulse_params = None
 
+    def _count_phase_trials_db(self, phase: str) -> int:
+        """Count trials with a specific impulse_phase from the breeder's DB.
+        Handles parallel workers — each worker has separate in-memory state."""
+        import os
+        try:
+            import psycopg2
+            user = os.environ.get('GODON_ARCHIVE_DB_USER', 'yugabyte')
+            pw = os.environ.get('GODON_ARCHIVE_DB_PASSWORD', 'yugabyte')
+            host = os.environ.get('GODON_ARCHIVE_DB_SERVICE_HOST', 'localhost')
+            port = os.environ.get('GODON_ARCHIVE_DB_SERVICE_PORT', '5433')
+            conn = psycopg2.connect(
+                f"host={host} port={port} user={user} password={pw} dbname={self._breeder_db_name}"
+            )
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT count(*) FROM trial_user_attributes "
+                "WHERE key = 'impulse_phase' AND value_json = %s",
+                (f'"{phase}"',)
+            )
+            count = cur.fetchone()[0]
+            cur.close()
+            conn.close()
+            return count
+        except Exception as e:
+            logger.warning(f"DB phase count failed: {e}")
+            return -1
+
     def _count_complete_trials_db(self) -> int:
         """Count COMPLETE trials from the breeder's DB.
 
@@ -438,7 +465,8 @@ class DetectionCoordinator:
             if not params:
                 _log("SENDER_PUSH: no impulse params — optimize fallback")
                 return {'mode': 'optimize', 'params': None}
-            self._push_count += 1
+            # Count push trials from DB (parallel workers have separate in-memory counters)
+            self._push_count = self._count_phase_trials_db('push')
             if self._push_count >= self.push_block_size:
                 self.state = self.SENDER_PAUSE
                 self._pause_count = 0
@@ -453,7 +481,7 @@ class DetectionCoordinator:
             if self._baseline_params is None:
                 _log("SENDER_PAUSE: no baseline — optimize fallback")
                 return {'mode': 'optimize', 'params': None}
-            self._pause_count += 1
+            self._pause_count = self._count_phase_trials_db('pause')
             if self._pause_count >= self.pause_block_size:
                 self.state = self.SENDER_DONE
                 _log(f"SENDER_PAUSE: pause {self._pause_count}/{self.pause_block_size} — block complete, DONE")
