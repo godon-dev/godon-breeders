@@ -39,8 +39,8 @@ class DetectionCoordinator:
 
     # States
     WARMUP = "warmup"
-    SENDER_PING = "sender_ping"
-    SENDER_LISTEN = "sender_listen"
+    SENDER_PUSH = "sender_push"       # Sustained extreme params (rising edge)
+    SENDER_PAUSE = "sender_pause"     # Sustained baseline params (falling edge)
     SENDER_DONE = "sender_done"
     RECEIVER_HOLD = "receiver_hold"
     RECOVER = "recover"
@@ -61,7 +61,8 @@ class DetectionCoordinator:
         # Config
         det_cfg = config.get('detection', {})
         self.warmup_target = det_cfg.get('warmup_trials', 15)
-        self.impulses_per_round = det_cfg.get('impulses_per_round', 5)
+        self.push_block_size = det_cfg.get('push_block_size', 15)
+        self.pause_block_size = det_cfg.get('pause_block_size', 15)
         self.recover_trials = det_cfg.get('recover_trials', 3)
 
         # State
@@ -69,8 +70,9 @@ class DetectionCoordinator:
         self._initialized = False
 
         # Counters
-        self._ping_count = 0       # Pings sent in current round
-        self._recover_count = 0    # Optimize trials in current RECOVER phase
+        self._push_count = 0        # Push trials in current block
+        self._pause_count = 0       # Pause trials in current block
+        self._recover_count = 0     # Optimize trials in current RECOVER phase
 
         # Params
         self._baseline_params = None    # Current safe operating point (best trial)
@@ -418,8 +420,9 @@ class DetectionCoordinator:
                 if self._baseline_params is None:
                     _log(f"warmup: {complete} complete but no effectuation_params stashed — staying WARMUP")
                 elif self._try_start_round():
-                    self.state = self.SENDER_PING
-                    self._ping_count = 0
+                    self.state = self.SENDER_PUSH
+                    self._push_count = 0
+                    self._pause_count = 0
                     _log(f"warmup done ({complete} trials) — became SENDER")
                 elif self._any_active_round():
                     self.state = self.RECEIVER_HOLD
@@ -430,32 +433,38 @@ class DetectionCoordinator:
                 _log(f"warmup: {complete}/{self.warmup_target} complete trials")
             return {'mode': 'optimize', 'params': None}
 
-        if self.state == self.SENDER_PING:
+        if self.state == self.SENDER_PUSH:
             params = self._get_impulse_params()
             if not params:
-                _log("SENDER_PING: no impulse params — optimize fallback")
+                _log("SENDER_PUSH: no impulse params — optimize fallback")
                 return {'mode': 'optimize', 'params': None}
-            self._ping_count += 1
-            self.state = self.SENDER_LISTEN
-            _log(f"SENDER_PING: ping #{self._ping_count}/{self.impulses_per_round}")
-            return {'mode': 'impulse', 'params': params, 'impulse_phase': 'ping'}
+            self._push_count += 1
+            if self._push_count >= self.push_block_size:
+                self.state = self.SENDER_PAUSE
+                self._pause_count = 0
+                _log(f"SENDER_PUSH: push {self._push_count}/{self.push_block_size} — block complete, entering PAUSE")
+            else:
+                _log(f"SENDER_PUSH: push {self._push_count}/{self.push_block_size}")
+            return {'mode': 'impulse', 'params': params, 'impulse_phase': 'push'}
 
-        if self.state == self.SENDER_LISTEN:
+        if self.state == self.SENDER_PAUSE:
             if self._baseline_params is None:
                 self._refresh_baseline(study)
             if self._baseline_params is None:
-                _log("SENDER_LISTEN: no baseline — optimize fallback")
+                _log("SENDER_PAUSE: no baseline — optimize fallback")
                 return {'mode': 'optimize', 'params': None}
-            if self._ping_count >= self.impulses_per_round:
+            self._pause_count += 1
+            if self._pause_count >= self.pause_block_size:
                 self.state = self.SENDER_DONE
+                _log(f"SENDER_PAUSE: pause {self._pause_count}/{self.pause_block_size} — block complete, DONE")
             else:
-                self.state = self.SENDER_PING
-            _log(f"SENDER_LISTEN: listen after ping #{self._ping_count}, next={'DONE' if self.state==self.SENDER_DONE else 'PING'}")
-            return {'mode': 'impulse', 'params': dict(self._baseline_params), 'impulse_phase': 'listen'}
+                _log(f"SENDER_PAUSE: pause {self._pause_count}/{self.pause_block_size}")
+            return {'mode': 'impulse', 'params': dict(self._baseline_params), 'impulse_phase': 'pause'}
 
         if self.state == self.SENDER_DONE:
             self._complete_my_round()
-            self._ping_count = 0
+            self._push_count = 0
+            self._pause_count = 0
             self._impulse_params = None
             self._recover_count = 0
             self.state = self.RECOVER
@@ -485,8 +494,9 @@ class DetectionCoordinator:
                     _log(f"RECOVER: no baseline after {self._recover_count} trials — staying RECOVER")
                     self._recover_count = 0
                 elif self._try_start_round():
-                    self.state = self.SENDER_PING
-                    self._ping_count = 0
+                    self.state = self.SENDER_PUSH
+                    self._push_count = 0
+                    self._pause_count = 0
                     _log(f"RECOVER done ({self._recover_count} trials) — became SENDER")
                 elif self._any_active_round():
                     self.state = self.RECEIVER_HOLD
@@ -503,14 +513,11 @@ class DetectionCoordinator:
         return {'mode': 'optimize', 'params': None}
 
     def on_guardrail_fail(self, params: Dict[str, Any]):
-        """Called when a trial fails guardrails. Scales down impulse if in ping phase."""
-        if self.state == self.SENDER_PING:
-            # Don't count this ping — it failed
-            self._ping_count = max(0, self._ping_count - 1)
+        """Called when a trial fails guardrails. Scales down impulse if in push phase."""
+        if self.state == self.SENDER_PUSH:
+            self._push_count = max(0, self._push_count - 1)
             self._aimd_backoff()
-            # Stay in SENDER_PING state — will retry next trial with lower scale
-            self.state = self.SENDER_PING
-            logger.info(f"Guardrail FAIL during ping — AIMD backoff, retrying")
+            logger.info(f"Guardrail FAIL during push — AIMD backoff, retrying")
 
     def get_state(self) -> str:
         """Return current state for debugging/observability."""
