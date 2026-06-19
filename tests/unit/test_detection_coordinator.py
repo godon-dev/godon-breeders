@@ -134,9 +134,11 @@ class TestSenderPush:
         coord._baseline_params = {'heating': 20.0}
         trial = MagicMock()
         # push_block_size=3, so trials 1 and 2 stay in PUSH
-        coord.decide_trial(trial, MagicMock())  # push 1
+        with patch.object(coord, '_count_phase_trials_db', return_value=1):
+            coord.decide_trial(trial, MagicMock())  # push 1
         assert coord.state == DetectionCoordinator.SENDER_PUSH
-        coord.decide_trial(trial, MagicMock())  # push 2
+        with patch.object(coord, '_count_phase_trials_db', return_value=2):
+            coord.decide_trial(trial, MagicMock())  # push 2
         assert coord.state == DetectionCoordinator.SENDER_PUSH
 
     def test_push_transitions_to_pause_when_block_complete(self):
@@ -144,9 +146,8 @@ class TestSenderPush:
         coord.state = DetectionCoordinator.SENDER_PUSH
         coord._baseline_params = {'heating': 20.0}
         trial = MagicMock()
-        coord.decide_trial(trial, MagicMock())  # push 1
-        coord.decide_trial(trial, MagicMock())  # push 2
-        coord.decide_trial(trial, MagicMock())  # push 3 = push_block_size
+        with patch.object(coord, '_count_phase_trials_db', return_value=3):
+            coord.decide_trial(trial, MagicMock())  # push 3 = push_block_size
         assert coord.state == DetectionCoordinator.SENDER_PAUSE
 
 
@@ -156,7 +157,8 @@ class TestSenderPause:
         coord.state = DetectionCoordinator.SENDER_PAUSE
         coord._baseline_params = {'heating': 20.0, 'light': 300.0}
         trial = MagicMock()
-        decision = coord.decide_trial(trial, MagicMock())
+        with patch.object(coord, '_count_phase_trials_db', return_value=1):
+            decision = coord.decide_trial(trial, MagicMock())
         assert decision['mode'] == 'impulse'
         assert decision['impulse_phase'] == 'pause'
         assert decision['params']['heating'] == 20.0
@@ -165,19 +167,19 @@ class TestSenderPause:
         coord, _ = _create_coordinator()
         coord.state = DetectionCoordinator.SENDER_PAUSE
         coord._baseline_params = {'heating': 20.0}
-        # pause_block_size=3
-        coord.decide_trial(MagicMock(), MagicMock())  # pause 1
+        with patch.object(coord, '_count_phase_trials_db', return_value=1):
+            coord.decide_trial(MagicMock(), MagicMock())  # pause 1
         assert coord.state == DetectionCoordinator.SENDER_PAUSE
-        coord.decide_trial(MagicMock(), MagicMock())  # pause 2
+        with patch.object(coord, '_count_phase_trials_db', return_value=2):
+            coord.decide_trial(MagicMock(), MagicMock())  # pause 2
         assert coord.state == DetectionCoordinator.SENDER_PAUSE
 
     def test_pause_transitions_to_done_when_block_complete(self):
         coord, _ = _create_coordinator()
         coord.state = DetectionCoordinator.SENDER_PAUSE
         coord._baseline_params = {'heating': 20.0}
-        coord.decide_trial(MagicMock(), MagicMock())  # pause 1
-        coord.decide_trial(MagicMock(), MagicMock())  # pause 2
-        coord.decide_trial(MagicMock(), MagicMock())  # pause 3
+        with patch.object(coord, '_count_phase_trials_db', return_value=3):
+            coord.decide_trial(MagicMock(), MagicMock())  # pause 3
         assert coord.state == DetectionCoordinator.SENDER_DONE
 
 
