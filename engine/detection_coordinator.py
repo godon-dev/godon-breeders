@@ -144,21 +144,37 @@ class DetectionCoordinator:
                     conn.rollback()
                     cur.close()
                     return False
-                # Fair turn-taking: yield if we were most recent sender (within 2min)
+                # Fair turn-taking: if we were the most recent sender, we MUST
+                # yield to let the other breeder take its turn. Only proceed if
+                # the other breeder has had a chance to send since our last round.
                 cur.execute(
                     "SELECT sender_id, created_at FROM detection_rounds "
                     "ORDER BY round_id DESC LIMIT 1"
                 )
                 row = cur.fetchone()
                 if row and row[0] == self.breeder_id:
-                    created_at = row[1]
-                    if created_at:
-                        cur.execute("SELECT EXTRACT(EPOCH FROM (NOW() - %s))", (created_at,))
-                        elapsed = cur.fetchone()[0]
-                        if elapsed < 120:
-                            conn.rollback()
-                            cur.close()
-                            return False
+                    # We were the most recent sender. Check if the OTHER breeder
+                    # has sent at all since our last round started. If not, yield
+                    # indefinitely until they get a turn.
+                    cur.execute(
+                        "SELECT count(*) FROM detection_rounds "
+                        "WHERE sender_id != %s AND round_id > "
+                        "(SELECT round_id FROM detection_rounds WHERE sender_id = %s ORDER BY round_id DESC LIMIT 1)",
+                        (self.breeder_id, self.breeder_id)
+                    )
+                    other_count = cur.fetchone()[0]
+                    if other_count == 0:
+                        # Other breeder hasn't sent since our last round.
+                        # Yield — but only up to 5 minutes total to avoid
+                        # permanent deadlock if other breeder crashed.
+                        created_at = row[1]
+                        if created_at:
+                            cur.execute("SELECT EXTRACT(EPOCH FROM (NOW() - %s))", (created_at,))
+                            elapsed = cur.fetchone()[0]
+                            if elapsed < 300:
+                                conn.rollback()
+                                cur.close()
+                                return False
                 # Insert — unique index ensures only one active round survives
                 cur.execute("INSERT INTO detection_rounds (sender_id) VALUES (%s)", (self.breeder_id,))
                 conn.commit()
