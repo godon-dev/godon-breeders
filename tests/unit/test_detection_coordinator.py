@@ -114,7 +114,8 @@ class TestSenderPush:
         coord.state = DetectionCoordinator.SENDER_PUSH
         coord._baseline_params = {'heating': 20.0, 'light': 300.0}
         trial = MagicMock()
-        decision = coord.decide_trial(trial, MagicMock())
+        with patch.object(coord, '_count_phase_trials_db', return_value=1):
+            decision = coord.decide_trial(trial, MagicMock())
         assert decision['mode'] == 'impulse'
         assert decision['impulse_phase'] == 'push'
         assert decision['params'] is not None
@@ -125,7 +126,8 @@ class TestSenderPush:
         coord.state = DetectionCoordinator.SENDER_PUSH
         coord._baseline_params = {'heating': 20.0}
         trial = MagicMock()
-        coord.decide_trial(trial, MagicMock())
+        with patch.object(coord, '_count_phase_trials_db', return_value=1):
+            coord.decide_trial(trial, MagicMock())
         assert coord._push_count == 1
 
     def test_push_stays_push_until_block_complete(self):
