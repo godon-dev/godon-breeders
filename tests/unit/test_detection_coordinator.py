@@ -108,20 +108,19 @@ class TestWarmup:
         assert coord.state == DetectionCoordinator.RECEIVER_HOLD
 
 
-class TestSenderPing:
-    def test_ping_returns_impulse_with_extreme_params(self):
+class TestSenderPush:
+    def test_push_returns_impulse_with_extreme_params(self):
         coord, _ = _create_coordinator()
         coord.state = DetectionCoordinator.SENDER_PUSH
         coord._baseline_params = {'heating': 20.0, 'light': 300.0}
         trial = MagicMock()
         decision = coord.decide_trial(trial, MagicMock())
         assert decision['mode'] == 'impulse'
-        assert decision['impulse_phase'] == 'ping'
+        assert decision['impulse_phase'] == 'push'
         assert decision['params'] is not None
-        # Heating should be at upper bound (30 * 1.0)
         assert decision['params']['heating'] == 30.0
 
-    def test_ping_increments_counter(self):
+    def test_push_increments_counter(self):
         coord, _ = _create_coordinator()
         coord.state = DetectionCoordinator.SENDER_PUSH
         coord._baseline_params = {'heating': 20.0}
@@ -129,40 +128,56 @@ class TestSenderPing:
         coord.decide_trial(trial, MagicMock())
         assert coord._push_count == 1
 
-    def test_ping_transitions_to_listen(self):
+    def test_push_stays_push_until_block_complete(self):
         coord, _ = _create_coordinator()
         coord.state = DetectionCoordinator.SENDER_PUSH
         coord._baseline_params = {'heating': 20.0}
         trial = MagicMock()
-        coord.decide_trial(trial, MagicMock())
+        # push_block_size=3, so trials 1 and 2 stay in PUSH
+        coord.decide_trial(trial, MagicMock())  # push 1
+        assert coord.state == DetectionCoordinator.SENDER_PUSH
+        coord.decide_trial(trial, MagicMock())  # push 2
+        assert coord.state == DetectionCoordinator.SENDER_PUSH
+
+    def test_push_transitions_to_pause_when_block_complete(self):
+        coord, _ = _create_coordinator()
+        coord.state = DetectionCoordinator.SENDER_PUSH
+        coord._baseline_params = {'heating': 20.0}
+        trial = MagicMock()
+        coord.decide_trial(trial, MagicMock())  # push 1
+        coord.decide_trial(trial, MagicMock())  # push 2
+        coord.decide_trial(trial, MagicMock())  # push 3 = push_block_size
         assert coord.state == DetectionCoordinator.SENDER_PAUSE
 
 
-class TestSenderListen:
-    def test_listen_returns_baseline_params(self):
+class TestSenderPause:
+    def test_pause_returns_baseline_params(self):
         coord, _ = _create_coordinator()
         coord.state = DetectionCoordinator.SENDER_PAUSE
         coord._baseline_params = {'heating': 20.0, 'light': 300.0}
         trial = MagicMock()
         decision = coord.decide_trial(trial, MagicMock())
         assert decision['mode'] == 'impulse'
-        assert decision['impulse_phase'] == 'listen'
-        assert decision['params']['heating'] == 20.0  # Baseline, not extreme
+        assert decision['impulse_phase'] == 'pause'
+        assert decision['params']['heating'] == 20.0
 
-    def test_listen_transitions_back_to_ping_if_round_not_done(self):
+    def test_pause_stays_pause_until_block_complete(self):
         coord, _ = _create_coordinator()
         coord.state = DetectionCoordinator.SENDER_PAUSE
-        coord._push_count = 1  # Less than impulses_per_round=3
         coord._baseline_params = {'heating': 20.0}
-        coord.decide_trial(MagicMock(), MagicMock())
-        assert coord.state == DetectionCoordinator.SENDER_PUSH
+        # pause_block_size=3
+        coord.decide_trial(MagicMock(), MagicMock())  # pause 1
+        assert coord.state == DetectionCoordinator.SENDER_PAUSE
+        coord.decide_trial(MagicMock(), MagicMock())  # pause 2
+        assert coord.state == DetectionCoordinator.SENDER_PAUSE
 
-    def test_listen_transitions_to_done_if_round_complete(self):
+    def test_pause_transitions_to_done_when_block_complete(self):
         coord, _ = _create_coordinator()
         coord.state = DetectionCoordinator.SENDER_PAUSE
-        coord._push_count = 3  # Equals impulses_per_round
         coord._baseline_params = {'heating': 20.0}
-        coord.decide_trial(MagicMock(), MagicMock())
+        coord.decide_trial(MagicMock(), MagicMock())  # pause 1
+        coord.decide_trial(MagicMock(), MagicMock())  # pause 2
+        coord.decide_trial(MagicMock(), MagicMock())  # pause 3
         assert coord.state == DetectionCoordinator.SENDER_DONE
 
 
