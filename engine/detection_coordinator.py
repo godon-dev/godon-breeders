@@ -39,12 +39,13 @@ class DetectionCoordinator:
 
     # States
     WARMUP = "warmup"
-    SENDER_PUSH = "sender_push"       # Sustained extreme params (rising edge)
-    SENDER_PAUSE = "sender_pause"     # Sustained baseline params (falling edge)
+    RECEIVER_BASELINE = "receiver_baseline"  # Hold before sender starts — clean baseline
+    SENDER_PUSH = "sender_push"
+    SENDER_PAUSE = "sender_pause"
     SENDER_DONE = "sender_done"
-    RECEIVER_HOLD = "receiver_hold"
+    RECEIVER_HOLD = "receiver_hold"  # Hold during sender's push+pause — signal window
+    RECEIVER_POST = "receiver_post"  # Hold after sender finishes — post baseline
     RECOVER = "recover"
-
     def __init__(
         self,
         breeder_id: str,
@@ -61,8 +62,10 @@ class DetectionCoordinator:
         # Config
         det_cfg = config.get('detection', {})
         self.warmup_target = det_cfg.get('warmup_trials', 15)
-        self.push_block_size = det_cfg.get('push_block_size', 15)
-        self.pause_block_size = det_cfg.get('pause_block_size', 15)
+        self.push_block_size = det_cfg.get('push_block_size', 5)
+        self.pause_block_size = det_cfg.get('pause_block_size', 5)
+        self.receiver_baseline_trials = det_cfg.get('receiver_baseline_trials', 3)
+        self.receiver_post_trials = det_cfg.get('receiver_post_trials', 3)
         self.recover_trials = det_cfg.get('recover_trials', 3)
 
         # State
@@ -73,6 +76,8 @@ class DetectionCoordinator:
         self._push_count = 0        # Push trials in current block
         self._pause_count = 0       # Pause trials in current block
         self._recover_count = 0     # Optimize trials in current RECOVER phase
+        self._receiver_baseline_count = 0  # Pre-impulse baseline hold trials
+        self._receiver_post_count = 0      # Post-impulse baseline hold trials
 
         # Params
         self._baseline_params = None    # Current safe operating point (best trial)
@@ -478,9 +483,10 @@ class DetectionCoordinator:
                 # Try to get a baseline from whatever trials we have
                 self._refresh_baseline_db()
             if self._any_active_round() and self._baseline_params is not None:
-                self.state = self.RECEIVER_HOLD
-                _log(f"warmup interrupted — became RECEIVER (other breeder active)")
-                return {'mode': 'hold', 'params': dict(self._baseline_params)}
+                self.state = self.RECEIVER_BASELINE
+                self._receiver_baseline_count = 0
+                _log(f"warmup interrupted — became RECEIVER_BASELINE (other breeder active)")
+                return {'mode': 'hold', 'params': dict(self._baseline_params), 'hold_phase': 'baseline'}
 
             complete = self._count_complete_trials_db()
             if complete < 0:
@@ -497,8 +503,9 @@ class DetectionCoordinator:
                     self._pause_count = 0
                     _log(f"warmup done ({complete} trials) — became SENDER")
                 elif self._any_active_round():
-                    self.state = self.RECEIVER_HOLD
-                    _log(f"warmup done ({complete} trials) — became RECEIVER")
+                    self.state = self.RECEIVER_BASELINE
+                    self._receiver_baseline_count = 0
+                    _log(f"warmup done ({complete} trials) — became RECEIVER_BASELINE")
                 else:
                     _log(f"warmup: {complete} trials, no active round and couldn't start one — staying WARMUP")
             else:
@@ -544,11 +551,26 @@ class DetectionCoordinator:
             _log("SENDER_DONE: round completed, entering RECOVER")
             return {'mode': 'optimize', 'params': None}
 
+        if self.state == self.RECEIVER_BASELINE:
+            # Pre-impulse baseline hold — receiver settles before sender pushes
+            self._receiver_baseline_count += 1
+            if self._receiver_baseline_count >= self.receiver_baseline_trials:
+                self.state = self.RECEIVER_HOLD
+                _log(f"RECEIVER_BASELINE: {self._receiver_baseline_count} trials done — entering RECEIVER_HOLD")
+            else:
+                _log(f"RECEIVER_BASELINE: trial {self._receiver_baseline_count}/{self.receiver_baseline_trials}")
+            if self._baseline_params:
+                return {'mode': 'hold', 'params': dict(self._baseline_params), 'hold_phase': 'baseline'}
+            return {'mode': 'optimize', 'params': None}
+
         if self.state == self.RECEIVER_HOLD:
             if not self._any_active_round():
-                self._recover_count = 0
-                self.state = self.RECOVER
-                _log("RECEIVER_HOLD: sender finished — entering RECOVER")
+                # Sender finished — enter POST baseline hold
+                self._receiver_post_count = 0
+                self.state = self.RECEIVER_POST
+                _log("RECEIVER_HOLD: sender finished — entering RECEIVER_POST")
+                if self._baseline_params:
+                    return {'mode': 'hold', 'params': dict(self._baseline_params), 'hold_phase': 'signal'}
                 return {'mode': 'optimize', 'params': None}
             if self._baseline_params is None:
                 self._refresh_baseline_db()
@@ -556,8 +578,20 @@ class DetectionCoordinator:
                 _log("RECEIVER_HOLD: no baseline params — optimizing")
                 return {'mode': 'optimize', 'params': None}
             params = dict(self._baseline_params)
-            _log("RECEIVER_HOLD: holding with baseline params")
-            return {'mode': 'hold', 'params': params}
+            _log("RECEIVER_HOLD: holding with baseline params (signal window)")
+            return {'mode': 'hold', 'params': params, 'hold_phase': 'signal'}
+
+        if self.state == self.RECEIVER_POST:
+            self._receiver_post_count += 1
+            if self._receiver_post_count >= self.receiver_post_trials:
+                self._recover_count = 0
+                self.state = self.RECOVER
+                _log(f"RECEIVER_POST: {self._receiver_post_count} trials done — entering RECOVER")
+                return {'mode': 'optimize', 'params': None}
+            _log(f"RECEIVER_POST: trial {self._receiver_post_count}/{self.receiver_post_trials}")
+            if self._baseline_params:
+                return {'mode': 'hold', 'params': dict(self._baseline_params), 'hold_phase': 'post'}
+            return {'mode': 'optimize', 'params': None}
 
         if self.state == self.RECOVER:
             self._recover_count += 1
@@ -572,8 +606,9 @@ class DetectionCoordinator:
                     self._pause_count = 0
                     _log(f"RECOVER done ({self._recover_count} trials) — became SENDER")
                 elif self._any_active_round():
-                    self.state = self.RECEIVER_HOLD
-                    _log(f"RECOVER done ({self._recover_count} trials) — became RECEIVER")
+                    self.state = self.RECEIVER_BASELINE
+                    self._receiver_baseline_count = 0
+                    _log(f"RECOVER done ({self._recover_count} trials) — became RECEIVER_BASELINE")
                 else:
                     _log(f"RECOVER: {self._recover_count} trials, no active round and couldn't start — staying RECOVER")
                     self._recover_count = 0
