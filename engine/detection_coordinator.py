@@ -242,6 +242,48 @@ class DetectionCoordinator:
         except Exception as e:
             logger.warning(f"Failed to complete round: {e}")
 
+    def _refresh_baseline_db(self):
+        """Query DB for best trial with effectuation_params.
+        Handles parallel workers — study.trials is local cache only."""
+        import os
+        try:
+            import psycopg2
+            user = os.environ.get('GODON_ARCHIVE_DB_USER', 'yugabyte')
+            pw = os.environ.get('GODON_ARCHIVE_DB_PASSWORD', 'yugabyte')
+            host = os.environ.get('GODON_ARCHIVE_DB_SERVICE_HOST', 'localhost')
+            port = os.environ.get('GODON_ARCHIVE_DB_SERVICE_PORT', '5433')
+            conn = psycopg2.connect(
+                f"host={host} port={port} user={user} password={pw} dbname={self._breeder_db_name}"
+            )
+            cur = conn.cursor()
+            # Get best trial with effectuation_params (lowest objective value for minimize)
+            cur.execute("""
+                SELECT tua.value_json, tv.value
+                FROM trial_user_attributes tua
+                JOIN trials t ON tua.trial_id = t.trial_id
+                JOIN trial_values tv ON t.trial_id = tv.trial_id AND tv.objective = 0
+                WHERE tua.key = 'effectuation_params' AND t.state = 'COMPLETE'
+                ORDER BY CASE WHEN tv.value IS NULL THEN 1 ELSE 0 END, tv.value
+                LIMIT 1
+            """)
+            row = cur.fetchone()
+            cur.close()
+            conn.close()
+            if row:
+                import json as _json
+                params_str = row[0]
+                # Strip JSON quotes if present
+                if isinstance(params_str, str):
+                    params_str = params_str.strip('"')
+                params = _json.loads(params_str) if isinstance(params_str, str) else params_str
+                self._baseline_params = params if isinstance(params, dict) else None
+                self._impulse_params = None
+                self._impulse_base_params = None
+                if self._baseline_params:
+                    logger.info(f"Refreshed baseline params from DB (best value: {row[1]:.4f})")
+        except Exception as e:
+            logger.warning(f"DB baseline refresh failed: {e}")
+
     def _refresh_baseline(self, study):
         """Find the best complete trial and use its params as the current baseline.
         Called after warmup and after each RECOVER phase."""
@@ -431,7 +473,7 @@ class DetectionCoordinator:
             # are contaminating their measurement window.
             if self._any_active_round() and self._baseline_params is None:
                 # Try to get a baseline from whatever trials we have
-                self._refresh_baseline(study)
+                self._refresh_baseline_db()
             if self._any_active_round() and self._baseline_params is not None:
                 self.state = self.RECEIVER_HOLD
                 _log(f"warmup interrupted — became RECEIVER (other breeder active)")
@@ -443,7 +485,7 @@ class DetectionCoordinator:
                 complete = sum(1 for t in study.trials if t.state == TrialState.COMPLETE) \
                     if study and study.trials else 0
             if complete >= self.warmup_target:
-                self._refresh_baseline(study)
+                self._refresh_baseline_db()
                 if self._baseline_params is None:
                     _log(f"warmup: {complete} complete but no effectuation_params stashed — staying WARMUP")
                 elif self._try_start_round():
@@ -477,7 +519,7 @@ class DetectionCoordinator:
 
         if self.state == self.SENDER_PAUSE:
             if self._baseline_params is None:
-                self._refresh_baseline(study)
+                self._refresh_baseline_db()
             if self._baseline_params is None:
                 _log("SENDER_PAUSE: no baseline — optimize fallback")
                 return {'mode': 'optimize', 'params': None}
@@ -506,7 +548,7 @@ class DetectionCoordinator:
                 _log("RECEIVER_HOLD: sender finished — entering RECOVER")
                 return {'mode': 'optimize', 'params': None}
             if self._baseline_params is None:
-                self._refresh_baseline(study)
+                self._refresh_baseline_db()
             if self._baseline_params is None:
                 _log("RECEIVER_HOLD: no baseline params — optimizing")
                 return {'mode': 'optimize', 'params': None}
@@ -517,7 +559,7 @@ class DetectionCoordinator:
         if self.state == self.RECOVER:
             self._recover_count += 1
             if self._recover_count >= self.recover_trials:
-                self._refresh_baseline(study)
+                self._refresh_baseline_db()
                 if self._baseline_params is None:
                     _log(f"RECOVER: no baseline after {self._recover_count} trials — staying RECOVER")
                     self._recover_count = 0
