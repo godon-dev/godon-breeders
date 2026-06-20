@@ -128,71 +128,59 @@ class DetectionCoordinator:
         except Exception as e:
             logger.warning(f"Failed to cleanup stale rounds: {e}")
 
-    def _try_start_round(self) -> bool:
-        """Try to start a new detection round as sender.
+    # Fixed lock key for sender coordination
+    SENDER_LOCK_KEY = 42000
 
-        Uses a unique partial index to prevent TOCTOU race at the DB level.
-        Only one active round can exist at a time — the second INSERT fails
-        with a constraint violation."""
+    def _try_start_round(self) -> bool:
+        """Try to become the sender using a PostgreSQL advisory lock.
+        
+        pg_try_advisory_lock is atomic — no race condition possible.
+        Only one breeder can hold the lock at a time. The lock is session-scoped,
+        released when the connection closes or pg_advisory_unlock is called.
+        
+        Fair turn-taking is checked AFTER acquiring the lock (no race on that read).
+        """
         def op(conn):
-            old_autocommit = conn.autocommit
-            conn.autocommit = False
-            try:
-                cur = conn.cursor()
-                # Ensure the unique partial index exists (only one active row allowed)
-                cur.execute("""
-                    CREATE UNIQUE INDEX IF NOT EXISTS detection_rounds_one_active
-                    ON detection_rounds ((1))
-                    WHERE status = 'active'
-                """)
-                # No active rounds allowed
-                cur.execute("SELECT count(*) FROM detection_rounds WHERE status = 'active'")
-                if cur.fetchone()[0] > 0:
-                    conn.rollback()
-                    cur.close()
-                    return False
-                # Fair turn-taking: if we were the most recent sender, we MUST
-                # yield to let the other breeder take its turn. Only proceed if
-                # the other breeder has had a chance to send since our last round.
-                cur.execute(
-                    "SELECT sender_id, created_at FROM detection_rounds "
-                    "ORDER BY round_id DESC LIMIT 1"
-                )
-                row = cur.fetchone()
-                if row and row[0] == self.breeder_id:
-                    # We were the most recent sender. Check if the OTHER breeder
-                    # has sent at all since our last round started. If not, yield
-                    # indefinitely until they get a turn.
-                    cur.execute(
-                        "SELECT count(*) FROM detection_rounds "
-                        "WHERE sender_id != %s AND round_id > "
-                        "(SELECT round_id FROM detection_rounds WHERE sender_id = %s ORDER BY round_id DESC LIMIT 1)",
-                        (self.breeder_id, self.breeder_id)
-                    )
-                    other_count = cur.fetchone()[0]
-                    if other_count == 0:
-                        # Other breeder hasn't sent since our last round.
-                        # Yield — but only up to 5 minutes total to avoid
-                        # permanent deadlock if other breeder crashed.
-                        created_at = row[1]
-                        if created_at:
-                            cur.execute("SELECT EXTRACT(EPOCH FROM (NOW() - %s))", (created_at,))
-                            elapsed = cur.fetchone()[0]
-                            if elapsed < 300:
-                                conn.rollback()
-                                cur.close()
-                                return False
-                # Insert — unique index ensures only one active round survives
-                cur.execute("INSERT INTO detection_rounds (sender_id) VALUES (%s)", (self.breeder_id,))
-                conn.commit()
+            cur = conn.cursor()
+            # Try to acquire the sender lock — atomic, no TOCTOU possible
+            cur.execute("SELECT pg_try_advisory_lock(%d)" % self.SENDER_LOCK_KEY)
+            got_lock = cur.fetchone()[0]
+            if not got_lock:
                 cur.close()
-                return True
-            except Exception:
-                # Constraint violation — another breeder inserted first
-                conn.rollback()
                 return False
-            finally:
-                conn.autocommit = old_autocommit
+            
+            # Got the lock. Check fair turn-taking.
+            cur.execute(
+                "SELECT sender_id, created_at FROM detection_rounds "
+                "ORDER BY round_id DESC LIMIT 1"
+            )
+            row = cur.fetchone()
+            if row and row[0] == self.breeder_id:
+                # We were the most recent sender. Check if other breeder has sent since.
+                cur.execute(
+                    "SELECT count(*) FROM detection_rounds "
+                    "WHERE sender_id != %s AND round_id > "
+                    "(SELECT round_id FROM detection_rounds WHERE sender_id = %s ORDER BY round_id DESC LIMIT 1)",
+                    (self.breeder_id, self.breeder_id)
+                )
+                other_count = cur.fetchone()[0]
+                if other_count == 0:
+                    # Other breeder hasn't sent since our last round.
+                    # Yield — but only up to 5 minutes to avoid permanent deadlock.
+                    created_at = row[1]
+                    if created_at:
+                        cur.execute("SELECT EXTRACT(EPOCH FROM (NOW() - %s))", (created_at,))
+                        elapsed = cur.fetchone()[0]
+                        if elapsed < 300:
+                            # Release lock, yield to other breeder
+                            cur.execute("SELECT pg_advisory_unlock(%d)" % self.SENDER_LOCK_KEY)
+                            cur.close()
+                            return False
+            
+            # Insert round record
+            cur.execute("INSERT INTO detection_rounds (sender_id) VALUES (%s)", (self.breeder_id,))
+            cur.close()
+            return True
         try:
             return self._db(op, "try_start_round")
         except Exception as e:
@@ -200,9 +188,11 @@ class DetectionCoordinator:
             return False
 
     def _has_own_active_round(self) -> bool:
-        """Check if this breeder has an active round (is the current sender)."""
+        """Check if this breeder is the current sender (holds the advisory lock)."""
         def op(conn):
             cur = conn.cursor()
+            # Check if WE hold the lock — pg_try_advisory_lock would fail if someone else holds it.
+            # But we don't want to steal it. Instead, check detection_rounds table.
             cur.execute(
                 "SELECT count(*) FROM detection_rounds "
                 "WHERE status = 'active' AND sender_id = %s",
@@ -232,7 +222,7 @@ class DetectionCoordinator:
             return False
 
     def _complete_my_round(self):
-        """Mark this breeder's active round as completed."""
+        """Mark this breeder's active round as completed and release the advisory lock."""
         def op(conn):
             cur = conn.cursor()
             cur.execute(
@@ -240,6 +230,8 @@ class DetectionCoordinator:
                 "WHERE status = 'active' AND sender_id = %s",
                 (self.breeder_id,)
             )
+            # Release the sender advisory lock so other breeders can claim it
+            cur.execute("SELECT pg_advisory_unlock(%d)" % self.SENDER_LOCK_KEY)
             cur.close()
         try:
             self._db(op, "complete_my_round")
