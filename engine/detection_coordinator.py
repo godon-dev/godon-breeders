@@ -258,12 +258,9 @@ class DetectionCoordinator:
             cur = conn.cursor()
             # Get best trial with effectuation_params (lowest objective value for minimize)
             cur.execute("""
-                SELECT tua.value_json, tv.value
-                FROM trial_user_attributes tua
-                JOIN trials t ON tua.trial_id = t.trial_id
-                JOIN trial_values tv ON t.trial_id = tv.trial_id AND tv.objective = 0
-                WHERE tua.key = 'effectuation_params' AND t.state = 'COMPLETE'
-                ORDER BY CASE WHEN tv.value IS NULL THEN 1 ELSE 0 END, tv.value
+                SELECT value_json FROM trial_user_attributes
+                WHERE key = 'effectuation_params'
+                ORDER BY trial_id DESC
                 LIMIT 1
             """)
             row = cur.fetchone()
@@ -272,9 +269,14 @@ class DetectionCoordinator:
             if row:
                 import json as _json
                 params_str = row[0]
-                # Strip JSON quotes if present
+                # YugaByte stores as double-encoded JSON: "{\"shading\": ...}"
                 if isinstance(params_str, str):
-                    params_str = params_str.strip('"')
+                    params_str = params_str.strip()
+                    # Strip outer quotes if present
+                    if params_str.startswith('"') and params_str.endswith('"'):
+                        params_str = params_str[1:-1]
+                    # Unescape inner quotes
+                    params_str = params_str.replace('\\"', '"')
                 params = _json.loads(params_str) if isinstance(params_str, str) else params_str
                 self._baseline_params = params if isinstance(params, dict) else None
                 self._impulse_params = None
