@@ -110,7 +110,7 @@ class TestWarmup:
              patch.object(coord, '_count_complete_trials_db', return_value=-1), \
              patch.object(coord, '_refresh_baseline_db'):
             decision = coord.decide_trial(trial, study)
-        assert coord.state == DetectionCoordinator.RECEIVER_HOLD
+        assert coord.state == DetectionCoordinator.RECEIVER_BASELINE
 
 
 class TestSenderPush:
@@ -234,7 +234,7 @@ class TestRecover:
 class TestReceiverHold:
     def test_returns_hold_with_baseline_params(self):
         coord, _ = _create_coordinator()
-        coord.state = DetectionCoordinator.RECEIVER_HOLD
+        coord.state = DetectionCoordinator.RECEIVER_BASELINE
         coord._baseline_params = {'heating': 20.0}
         decision = coord.decide_trial(MagicMock(), MagicMock())
         assert decision['mode'] == 'hold'
@@ -242,7 +242,7 @@ class TestReceiverHold:
 
     def test_enters_recover_when_sender_finishes(self):
         coord, _ = _create_coordinator()
-        coord.state = DetectionCoordinator.RECEIVER_HOLD
+        coord.state = DetectionCoordinator.RECEIVER_BASELINE
         coord._baseline_params = {'heating': 20.0}
         with patch.object(coord, '_any_active_round', return_value=False):
             decision = coord.decide_trial(MagicMock(), MagicMock())

@@ -1247,6 +1247,8 @@ class BreederWorker:
                     trial.set_user_attr('detection_mode', detection_mode)
                     if decision.get('impulse_phase'):
                         trial.set_user_attr('impulse_phase', decision['impulse_phase'])
+                    if decision.get('hold_phase'):
+                        trial.set_user_attr('hold_phase', decision['hold_phase'])
 
                     if decision.get('skip'):
                         # Coordinator says skip — no baseline params available.
