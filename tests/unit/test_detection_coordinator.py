@@ -81,7 +81,8 @@ class TestWarmup:
         study = _mock_study(n_complete=1)  # Less than warmup_target=3
         trial = MagicMock()
         with patch.object(coord, '_any_active_round', return_value=False), \
-             patch.object(coord, '_count_complete_trials_db', return_value=-1):
+             patch.object(coord, '_count_complete_trials_db', return_value=-1), \
+             patch.object(coord, '_refresh_baseline_db'):
             decision = coord.decide_trial(trial, study)
         assert decision['mode'] == 'optimize'
         assert decision['params'] is None
@@ -93,7 +94,8 @@ class TestWarmup:
         trial = MagicMock()
         # db returns True for try_start_round
         with patch.object(coord, '_any_active_round', return_value=False), \
-             patch.object(coord, '_count_complete_trials_db', return_value=-1):
+             patch.object(coord, '_count_complete_trials_db', return_value=-1), \
+             patch.object(coord, '_refresh_baseline_db'):
             decision = coord.decide_trial(trial, study)
         assert decision['mode'] == 'optimize'  # Last warmup trial
         assert coord.state == DetectionCoordinator.SENDER_PUSH
@@ -114,7 +116,8 @@ class TestSenderPush:
         coord.state = DetectionCoordinator.SENDER_PUSH
         coord._baseline_params = {'heating': 20.0, 'light': 300.0}
         trial = MagicMock()
-        with patch.object(coord, '_count_phase_trials_db', return_value=1):
+        with patch.object(coord, '_refresh_baseline_db'), \
+             patch.object(coord, '_count_phase_trials_db', return_value=1):
             decision = coord.decide_trial(trial, MagicMock())
         assert decision['mode'] == 'impulse'
         assert decision['impulse_phase'] == 'push'
@@ -126,7 +129,8 @@ class TestSenderPush:
         coord.state = DetectionCoordinator.SENDER_PUSH
         coord._baseline_params = {'heating': 20.0}
         trial = MagicMock()
-        with patch.object(coord, '_count_phase_trials_db', return_value=1):
+        with patch.object(coord, '_refresh_baseline_db'), \
+             patch.object(coord, '_count_phase_trials_db', return_value=1):
             coord.decide_trial(trial, MagicMock())
         assert coord._push_count == 1
 
@@ -136,10 +140,12 @@ class TestSenderPush:
         coord._baseline_params = {'heating': 20.0}
         trial = MagicMock()
         # push_block_size=3, so trials 1 and 2 stay in PUSH
-        with patch.object(coord, '_count_phase_trials_db', return_value=1):
+        with patch.object(coord, '_refresh_baseline_db'), \
+             patch.object(coord, '_count_phase_trials_db', return_value=1):
             coord.decide_trial(trial, MagicMock())  # push 1
         assert coord.state == DetectionCoordinator.SENDER_PUSH
-        with patch.object(coord, '_count_phase_trials_db', return_value=2):
+        with patch.object(coord, '_refresh_baseline_db'), \
+             patch.object(coord, '_count_phase_trials_db', return_value=2):
             coord.decide_trial(trial, MagicMock())  # push 2
         assert coord.state == DetectionCoordinator.SENDER_PUSH
 
@@ -148,7 +154,8 @@ class TestSenderPush:
         coord.state = DetectionCoordinator.SENDER_PUSH
         coord._baseline_params = {'heating': 20.0}
         trial = MagicMock()
-        with patch.object(coord, '_count_phase_trials_db', return_value=3):
+        with patch.object(coord, '_refresh_baseline_db'), \
+             patch.object(coord, '_count_phase_trials_db', return_value=3):
             coord.decide_trial(trial, MagicMock())  # push 3 = push_block_size
         assert coord.state == DetectionCoordinator.SENDER_PAUSE
 
@@ -159,7 +166,8 @@ class TestSenderPause:
         coord.state = DetectionCoordinator.SENDER_PAUSE
         coord._baseline_params = {'heating': 20.0, 'light': 300.0}
         trial = MagicMock()
-        with patch.object(coord, '_count_phase_trials_db', return_value=1):
+        with patch.object(coord, '_refresh_baseline_db'), \
+             patch.object(coord, '_count_phase_trials_db', return_value=1):
             decision = coord.decide_trial(trial, MagicMock())
         assert decision['mode'] == 'impulse'
         assert decision['impulse_phase'] == 'pause'
@@ -169,10 +177,12 @@ class TestSenderPause:
         coord, _ = _create_coordinator()
         coord.state = DetectionCoordinator.SENDER_PAUSE
         coord._baseline_params = {'heating': 20.0}
-        with patch.object(coord, '_count_phase_trials_db', return_value=1):
+        with patch.object(coord, '_refresh_baseline_db'), \
+             patch.object(coord, '_count_phase_trials_db', return_value=1):
             coord.decide_trial(MagicMock(), MagicMock())  # pause 1
         assert coord.state == DetectionCoordinator.SENDER_PAUSE
-        with patch.object(coord, '_count_phase_trials_db', return_value=2):
+        with patch.object(coord, '_refresh_baseline_db'), \
+             patch.object(coord, '_count_phase_trials_db', return_value=2):
             coord.decide_trial(MagicMock(), MagicMock())  # pause 2
         assert coord.state == DetectionCoordinator.SENDER_PAUSE
 
@@ -180,7 +190,8 @@ class TestSenderPause:
         coord, _ = _create_coordinator()
         coord.state = DetectionCoordinator.SENDER_PAUSE
         coord._baseline_params = {'heating': 20.0}
-        with patch.object(coord, '_count_phase_trials_db', return_value=3):
+        with patch.object(coord, '_refresh_baseline_db'), \
+             patch.object(coord, '_count_phase_trials_db', return_value=3):
             coord.decide_trial(MagicMock(), MagicMock())  # pause 3
         assert coord.state == DetectionCoordinator.SENDER_DONE
 
@@ -260,7 +271,8 @@ class TestStateCleanup:
         trial = MagicMock()
         study = _mock_study(n_complete=0)
         with patch.object(coord, '_any_active_round', return_value=False), \
-             patch.object(coord, '_count_complete_trials_db', return_value=-1):
+             patch.object(coord, '_count_complete_trials_db', return_value=-1), \
+             patch.object(coord, '_refresh_baseline_db'):
             coord.decide_trial(trial, study)
         # Should have called db at least once for cleanup
         assert db.call_count >= 1
