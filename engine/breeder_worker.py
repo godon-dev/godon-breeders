@@ -1288,9 +1288,10 @@ class BreederWorker:
                         if self.watermark:
                             logger.info(f"Watermarking activated (lazy): {self.watermark.metadata()}")
 
-                    # Watermark and detection modes are mutually exclusive —
-                    # coordinated detection replaces the old watermark system.
-                    if self.watermark and detection_mode not in ('hold', 'impulse'):
+                    # Old spectral watermark system is DISABLED.
+                    # Block design coordinated detection (push/pause) replaces it entirely.
+                    # The watermark code below is kept for reference but never executes.
+                    if False and self.watermark and detection_mode not in ('hold', 'impulse'):
                         wm_complete = hasattr(self.watermark, 'is_complete') and self.watermark.is_complete()
                         if not wm_complete:
                             wm_params = self.watermark.generate(self._watermark_trial_idx, params)
