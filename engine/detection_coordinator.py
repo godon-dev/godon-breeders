@@ -282,9 +282,10 @@ class DetectionCoordinator:
                 self._impulse_params = None
                 self._impulse_base_params = None
                 if self._baseline_params:
-                    logger.info(f"Refreshed baseline params from DB (best value: {row[1]:.4f})")
+                    logger.info(f"Refreshed baseline params from DB")
         except Exception as e:
-            logger.warning(f"DB baseline refresh failed: {e}")
+            import traceback
+            logger.warning(f"DB baseline refresh failed: {e}\n{traceback.format_exc()}")
 
     def _refresh_baseline(self, study):
         """Find the best complete trial and use its params as the current baseline.
