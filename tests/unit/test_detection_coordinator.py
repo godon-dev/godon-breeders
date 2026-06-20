@@ -92,7 +92,7 @@ class TestWarmup:
         coord, db = _create_coordinator()
         study = _mock_study(n_complete=3)  # Equals warmup_target
         trial = MagicMock()
-        # db returns True for try_start_round
+        coord._baseline_params = {'heating': 20.0}  # Pre-set baseline
         with patch.object(coord, '_any_active_round', return_value=False), \
              patch.object(coord, '_count_complete_trials_db', return_value=-1), \
              patch.object(coord, '_refresh_baseline_db'):
@@ -104,8 +104,11 @@ class TestWarmup:
         coord, db = _create_coordinator(db_return=False)
         study = _mock_study(n_complete=3)
         trial = MagicMock()
+        coord._baseline_params = {'heating': 20.0}  # Pre-set baseline
         # Need _any_active_round to return True
-        with patch.object(coord, '_any_active_round', return_value=True):
+        with patch.object(coord, '_any_active_round', return_value=True), \
+             patch.object(coord, '_count_complete_trials_db', return_value=-1), \
+             patch.object(coord, '_refresh_baseline_db'):
             decision = coord.decide_trial(trial, study)
         assert coord.state == DetectionCoordinator.RECEIVER_HOLD
 
@@ -221,7 +224,9 @@ class TestRecover:
         coord._recover_count = 1  # One more and it's done (target=2)
         coord._baseline_params = {'heating': 20.0}
         study = _mock_study(n_complete=5)
-        decision = coord.decide_trial(MagicMock(), study)
+        with patch.object(coord, '_refresh_baseline_db'), \
+             patch.object(coord, '_count_phase_trials_db', return_value=0):
+            decision = coord.decide_trial(MagicMock(), study)
         assert coord.state == DetectionCoordinator.SENDER_PUSH
         assert coord._push_count == 0
 
