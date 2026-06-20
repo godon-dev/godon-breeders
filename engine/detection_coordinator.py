@@ -480,11 +480,8 @@ class DetectionCoordinator:
                 _log(f"warmup interrupted — became RECEIVER_BASELINE (other breeder active)")
                 return {'mode': 'hold', 'params': dict(self._baseline_params), 'hold_phase': 'baseline'}
 
-            complete = self._count_complete_trials_db()
-            if complete < 0:
-                # Fallback to study.trials if DB query failed
-                complete = sum(1 for t in study.trials if t.state == TrialState.COMPLETE) \
-                    if study and study.trials else 0
+            complete = sum(1 for t in study.trials if t.state == TrialState.COMPLETE) \
+                if study and study.trials else 0
             if complete >= self.warmup_target:
                 self._refresh_baseline_db()
                 if self._baseline_params is None:
@@ -509,8 +506,7 @@ class DetectionCoordinator:
             if not params:
                 _log("SENDER_PUSH: no impulse params — optimize fallback")
                 return {'mode': 'optimize', 'params': None}
-            # Count push trials from DB (parallel workers have separate in-memory counters)
-            self._push_count = self._count_phase_trials_db('push')
+            self._push_count += 1
             if self._push_count >= self.push_block_size:
                 self.state = self.SENDER_PAUSE
                 self._pause_count = 0
@@ -525,7 +521,7 @@ class DetectionCoordinator:
             if self._baseline_params is None:
                 _log("SENDER_PAUSE: no baseline — optimize fallback")
                 return {'mode': 'optimize', 'params': None}
-            self._pause_count = self._count_phase_trials_db('pause')
+            self._pause_count += 1
             if self._pause_count >= self.pause_block_size:
                 self.state = self.SENDER_DONE
                 _log(f"SENDER_PAUSE: pause {self._pause_count}/{self.pause_block_size} — block complete, DONE")
