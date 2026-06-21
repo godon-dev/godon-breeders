@@ -85,6 +85,30 @@ class DetectionCoordinator:
         self._impulse_scale = 1.0       # AIMD scale factor
         self._impulse_base_params = None  # Original baseline for AIMD re-scaling
 
+        # Persistent advisory lock connection — held open for entire sender round
+        self._lock_conn = None
+
+    def _get_lock_connection(self):
+        """Get or create a persistent connection for the advisory lock.
+
+        This connection stays open between _try_start_round (acquire) and
+        _complete_my_round (release). Without holding the connection open,
+        the session-scoped advisory lock is released immediately.
+        """
+        if self._lock_conn is None or self._lock_conn.closed:
+            import os
+            import psycopg2
+            user = os.environ.get('GODON_ARCHIVE_DB_USER', 'yugabyte')
+            pw = os.environ.get('GODON_ARCHIVE_DB_PASSWORD', 'yugabyte')
+            host = os.environ.get('GODON_ARCHIVE_DB_SERVICE_HOST', 'localhost')
+            port = os.environ.get('GODON_ARCHIVE_DB_SERVICE_PORT', '5433')
+            self._lock_conn = psycopg2.connect(
+                f"host={host} port={port} user={user} password={pw} dbname=archive_db"
+            )
+            self._lock_conn.autocommit = True
+            logger.info("Opened persistent advisory lock connection")
+        return self._lock_conn
+
     def _cleanup_stale_rounds(self):
         """Reset coordination state.
 
@@ -133,30 +157,27 @@ class DetectionCoordinator:
 
     def _try_start_round(self) -> bool:
         """Try to become the sender using a PostgreSQL advisory lock.
-        
-        pg_try_advisory_lock is atomic — no race condition possible.
-        Only one breeder can hold the lock at a time. The lock is session-scoped,
-        released when the connection closes or pg_advisory_unlock is called.
-        
-        Fair turn-taking is checked AFTER acquiring the lock (no race on that read).
+
+        Uses a PERSISTENT connection so the advisory lock survives between
+        _try_start_round (acquire) and _complete_my_round (release).
         """
-        def op(conn):
+        try:
+            conn = self._get_lock_connection()
             cur = conn.cursor()
-            # Try to acquire the sender lock — atomic, no TOCTOU possible
+
+            # Atomic lock acquisition
             cur.execute("SELECT pg_try_advisory_lock(%d)" % self.SENDER_LOCK_KEY)
             got_lock = cur.fetchone()[0]
             if not got_lock:
                 cur.close()
                 return False
-            
-            # Got the lock. Check fair turn-taking.
+
+            # Check fair turn-taking — were we the most recent sender?
             cur.execute(
-                "SELECT sender_id, created_at FROM detection_rounds "
-                "ORDER BY round_id DESC LIMIT 1"
+                "SELECT sender_id FROM detection_rounds ORDER BY round_id DESC LIMIT 1"
             )
             row = cur.fetchone()
             if row and row[0] == self.breeder_id:
-                # We were the most recent sender. Check if other breeder has sent since.
                 cur.execute(
                     "SELECT count(*) FROM detection_rounds "
                     "WHERE sender_id != %s AND round_id > "
@@ -165,24 +186,16 @@ class DetectionCoordinator:
                 )
                 other_count = cur.fetchone()[0]
                 if other_count == 0:
-                    # Other breeder hasn't sent since our last round.
-                    # Yield — but only up to 5 minutes to avoid permanent deadlock.
-                    created_at = row[1]
-                    if created_at:
-                        cur.execute("SELECT EXTRACT(EPOCH FROM (NOW() - %s))", (created_at,))
-                        elapsed = cur.fetchone()[0]
-                        if elapsed < 300:
-                            # Release lock, yield to other breeder
-                            cur.execute("SELECT pg_advisory_unlock(%d)" % self.SENDER_LOCK_KEY)
-                            cur.close()
-                            return False
-            
-            # Insert round record
+                    logger.info("Was most recent sender — yielding to other breeder")
+                    cur.execute("SELECT pg_advisory_unlock(%d)" % self.SENDER_LOCK_KEY)
+                    cur.close()
+                    return False
+
+            # Insert round record — lock stays held on this persistent connection
             cur.execute("INSERT INTO detection_rounds (sender_id) VALUES (%s)", (self.breeder_id,))
             cur.close()
+            logger.info(f"Acquired sender lock and started round (key={self.SENDER_LOCK_KEY})")
             return True
-        try:
-            return self._db(op, "try_start_round")
         except Exception as e:
             logger.warning(f"Failed to start round: {e}")
             return False
@@ -223,19 +236,17 @@ class DetectionCoordinator:
 
     def _complete_my_round(self):
         """Mark this breeder's active round as completed and release the advisory lock."""
-        def op(conn):
+        try:
+            conn = self._get_lock_connection()
             cur = conn.cursor()
             cur.execute(
                 "UPDATE detection_rounds SET status = 'completed', completed_at = NOW() "
                 "WHERE status = 'active' AND sender_id = %s",
                 (self.breeder_id,)
             )
-            # Release the sender advisory lock so other breeders can claim it
             cur.execute("SELECT pg_advisory_unlock(%d)" % self.SENDER_LOCK_KEY)
             cur.close()
-        try:
-            self._db(op, "complete_my_round")
-            logger.info("Detection round completed")
+            logger.info(f"Released sender advisory lock (key={self.SENDER_LOCK_KEY})")
         except Exception as e:
             logger.warning(f"Failed to complete round: {e}")
 
