@@ -491,8 +491,12 @@ class DetectionCoordinator:
                 _log(f"warmup interrupted — became RECEIVER_BASELINE (other breeder active)")
                 return {'mode': 'hold', 'params': dict(self._baseline_params), 'hold_phase': 'baseline'}
 
-            complete = sum(1 for t in study.trials if t.state == TrialState.COMPLETE) \
-                if study and study.trials else 0
+            # Count COMPLETE trials from DB — study.trials local cache is unreliable
+            # with YugaByte (doesn't reflect all committed trials)
+            complete = self._count_complete_trials_db()
+            if complete < 0:
+                complete = sum(1 for t in study.trials if t.state == TrialState.COMPLETE) \
+                    if study and study.trials else 0
             if complete >= self.warmup_target:
                 self._refresh_baseline_db()
                 if self._baseline_params is None:
