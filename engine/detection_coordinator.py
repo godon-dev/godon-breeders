@@ -85,29 +85,8 @@ class DetectionCoordinator:
         self._impulse_scale = 1.0       # AIMD scale factor
         self._impulse_base_params = None  # Original baseline for AIMD re-scaling
 
-        # Persistent advisory lock connection — held open for entire sender round
-        self._lock_conn = None
-
-    def _get_lock_connection(self):
-        """Get or create a persistent connection for the advisory lock.
-
-        This connection stays open between _try_start_round (acquire) and
-        _complete_my_round (release). Without holding the connection open,
-        the session-scoped advisory lock is released immediately.
-        """
-        if self._lock_conn is None or self._lock_conn.closed:
-            import os
-            import psycopg2
-            user = os.environ.get('GODON_ARCHIVE_DB_USER', 'yugabyte')
-            pw = os.environ.get('GODON_ARCHIVE_DB_PASSWORD', 'yugabyte')
-            host = os.environ.get('GODON_ARCHIVE_DB_SERVICE_HOST', 'localhost')
-            port = os.environ.get('GODON_ARCHIVE_DB_SERVICE_PORT', '5433')
-            self._lock_conn = psycopg2.connect(
-                f"host={host} port={port} user={user} password={pw} dbname=archive_db"
-            )
-            self._lock_conn.autocommit = True
-            logger.info("Opened persistent advisory lock connection")
-        return self._lock_conn
+        # Fencing token lease — tracks our current lease token for stale detection
+        self._lease_token = 0
 
     def _cleanup_stale_rounds(self):
         """Reset coordination state.
@@ -152,9 +131,6 @@ class DetectionCoordinator:
         except Exception as e:
             logger.warning(f"Failed to cleanup stale rounds: {e}")
 
-    # Fixed lock key for sender coordination
-    SENDER_LOCK_KEY = 42000
-    
     # Safety limits — no state runs forever
     MAX_PUSH_ATTEMPTS = 20       # Hard cap on push trials (including FAILs)
     MAX_PAUSE_TRIALS = 20        # Hard cap on pause trials
@@ -163,100 +139,144 @@ class DetectionCoordinator:
     MAX_RECEIVER_BASELINE = 15   # Hard cap on pre-impulse baseline
     MAX_RECEIVER_POST = 15       # Hard cap on post-impulse baseline
 
-    def _try_start_round(self) -> bool:
-        """Try to become the sender using a PostgreSQL advisory lock.
+    # Lease duration: sender must heartbeat every trial (~30s). Lease expires
+    # if sender crashes or hangs. 90s = 3 missed heartbeats before takeover.
+    LEASE_DURATION_SECONDS = 90
 
-        Uses a PERSISTENT connection so the advisory lock survives between
-        _try_start_round (acquire) and _complete_my_round (release).
-        """
-        try:
-            conn = self._get_lock_connection()
+    def _ensure_lease_table(self):
+        """Create the sender_lease table if it doesn't exist. Called once at init."""
+        def op(conn):
             cur = conn.cursor()
-
-            # Atomic lock acquisition
-            cur.execute("SELECT pg_try_advisory_lock(%d)" % self.SENDER_LOCK_KEY)
-            got_lock = cur.fetchone()[0]
-            if not got_lock:
-                cur.close()
-                return False
-
-            # Check fair turn-taking — were we the most recent sender?
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS sender_lease (
+                    id INT PRIMARY KEY DEFAULT 1,
+                    holder VARCHAR(255),
+                    token INT DEFAULT 0,
+                    expires_at TIMESTAMPTZ,
+                    CHECK (id = 1)
+                )
+            """)
+            # Insert singleton row if not exists
             cur.execute(
-                "SELECT sender_id FROM detection_rounds ORDER BY round_id DESC LIMIT 1"
+                "INSERT INTO sender_lease (id, holder, token, expires_at) "
+                "VALUES (1, NULL, 0, NULL) ON CONFLICT (id) DO NOTHING"
+            )
+            cur.close()
+        try:
+            self._db(op, "ensure_lease_table")
+        except Exception as e:
+            logger.warning(f"Failed to create lease table: {e}")
+
+    def _try_acquire_lease(self) -> bool:
+        """Try to become the sender by acquiring the lease.
+        
+        Atomic conditional UPDATE — no race condition possible.
+        Returns True if we got the lease, False if someone else holds it.
+        """
+        def op(conn):
+            cur = conn.cursor()
+            # Acquire: lease is free if holder is NULL or lease expired
+            cur.execute(
+                "UPDATE sender_lease "
+                "SET holder = %s, token = token + 1, expires_at = NOW() + INTERVAL '%d seconds' "
+                "WHERE id = 1 AND (holder IS NULL OR expires_at < NOW())",
+                (self.breeder_id, self.LEASE_DURATION_SECONDS)
+            )
+            updated = cur.rowcount
+            if updated > 0:
+                # Read back our token
+                cur.execute("SELECT token FROM sender_lease WHERE id = 1")
+                self._lease_token = cur.fetchone()[0]
+            cur.close()
+            return updated > 0
+        try:
+            return self._db(op, "acquire_lease")
+        except Exception as e:
+            logger.warning(f"Failed to acquire lease: {e}")
+            return False
+
+    def _heartbeat_lease(self) -> bool:
+        """Renew the lease. Called every trial while sender.
+        
+        Returns True if we still hold the lease, False if we lost it
+        (another breeder took over). Uses fencing token to detect staleness.
+        """
+        def op(conn):
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE sender_lease "
+                "SET expires_at = NOW() + INTERVAL '%d seconds' "
+                "WHERE id = 1 AND holder = %s AND token = %s",
+                (self.LEASE_DURATION_SECONDS, self.breeder_id, self._lease_token)
+            )
+            result = cur.rowcount > 0
+            cur.close()
+            return result
+        try:
+            return self._db(op, "heartbeat_lease")
+        except Exception as e:
+            logger.warning(f"Heartbeat failed: {e}")
+            return False
+
+    def _release_lease(self):
+        """Release the lease so the other breeder can become sender immediately."""
+        def op(conn):
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE sender_lease SET holder = NULL "
+                "WHERE id = 1 AND holder = %s AND token = %s",
+                (self.breeder_id, self._lease_token)
+            )
+            cur.close()
+        try:
+            self._db(op, "release_lease")
+            logger.info(f"Released sender lease (token={self._lease_token})")
+        except Exception as e:
+            logger.warning(f"Failed to release lease: {e}")
+
+    def _is_sender(self) -> bool:
+        """Check if we are currently the lease holder (without acquiring)."""
+        def op(conn):
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT holder, token FROM sender_lease WHERE id = 1"
             )
             row = cur.fetchone()
-            if row and row[0] == self.breeder_id:
-                cur.execute(
-                    "SELECT count(*) FROM detection_rounds "
-                    "WHERE sender_id != %s AND round_id > "
-                    "(SELECT round_id FROM detection_rounds WHERE sender_id = %s ORDER BY round_id DESC LIMIT 1)",
-                    (self.breeder_id, self.breeder_id)
-                )
-                other_count = cur.fetchone()[0]
-                if other_count == 0:
-                    logger.info("Was most recent sender — yielding to other breeder")
-                    cur.execute("SELECT pg_advisory_unlock(%d)" % self.SENDER_LOCK_KEY)
-                    cur.close()
-                    return False
-
-            # Insert round record — lock stays held on this persistent connection
-            cur.execute("INSERT INTO detection_rounds (sender_id) VALUES (%s)", (self.breeder_id,))
             cur.close()
-            logger.info(f"Acquired sender lock and started round (key={self.SENDER_LOCK_KEY})")
-            return True
-        except Exception as e:
-            logger.warning(f"Failed to start round: {e}")
+            if not row:
+                return False
+            holder, token = row
+            return holder == self.breeder_id and token == self._lease_token
+        try:
+            return self._db(op, "is_sender")
+        except Exception:
             return False
 
-    def _has_own_active_round(self) -> bool:
-        """Check if this breeder is the current sender (holds the advisory lock)."""
+    def _has_active_sender(self) -> bool:
+        """Check if any breeder currently holds a valid (non-expired) lease."""
         def op(conn):
             cur = conn.cursor()
-            # Check if WE hold the lock — pg_try_advisory_lock would fail if someone else holds it.
-            # But we don't want to steal it. Instead, check detection_rounds table.
             cur.execute(
-                "SELECT count(*) FROM detection_rounds "
-                "WHERE status = 'active' AND sender_id = %s",
-                (self.breeder_id,)
+                "SELECT count(*) FROM sender_lease WHERE id = 1 AND holder IS NOT NULL AND expires_at > NOW()"
             )
             result = cur.fetchone()[0] > 0
             cur.close()
             return result
         try:
-            return self._db(op, "has_own_active_round")
+            return self._db(op, "has_active_sender")
         except Exception:
             return False
 
-    def _any_active_round(self) -> bool:
-        """Check if any breeder has an active round."""
-        def op(conn):
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT count(*) FROM detection_rounds WHERE status = 'active'"
-            )
-            result = cur.fetchone()[0] > 0
-            cur.close()
-            return result
-        try:
-            return self._db(op, "any_active_round")
-        except Exception:
+    def _try_start_round(self) -> bool:
+        """Try to become the sender by acquiring the lease."""
+        if not self._try_acquire_lease():
             return False
+        logger.info(f"Acquired sender lease (token={self._lease_token})")
+        return True
 
     def _complete_my_round(self):
-        """Mark this breeder's active round as completed and release the advisory lock."""
-        try:
-            conn = self._get_lock_connection()
-            cur = conn.cursor()
-            cur.execute(
-                "UPDATE detection_rounds SET status = 'completed', completed_at = NOW() "
-                "WHERE status = 'active' AND sender_id = %s",
-                (self.breeder_id,)
-            )
-            cur.execute("SELECT pg_advisory_unlock(%d)" % self.SENDER_LOCK_KEY)
-            cur.close()
-            logger.info(f"Released sender advisory lock (key={self.SENDER_LOCK_KEY})")
-        except Exception as e:
-            logger.warning(f"Failed to complete round: {e}")
+        """Release the lease so the other breeder can become sender."""
+        self._release_lease()
 
     def _refresh_baseline_db(self):
         """Query DB for best trial with effectuation_params.
@@ -482,9 +502,19 @@ class DetectionCoordinator:
 
         # First-time initialization
         if not self._initialized:
-            _log(f"first init — cleaning stale rounds")
+            _log(f"first init — cleaning stale rounds, creating lease table")
             self._cleanup_stale_rounds()
+            self._ensure_lease_table()
             self._initialized = True
+
+        # Lease heartbeat: if we're the sender, renew the lease every trial.
+        # If the heartbeat fails (another breeder took over), transition to RECOVER.
+        if self.state in (self.SENDER_PUSH, self.SENDER_PAUSE):
+            if not self._heartbeat_lease():
+                logger.warning("Lost sender lease — another breeder took over")
+                self.state = self.RECOVER
+                self._recover_count = 0
+                return {'mode': 'optimize', 'params': None}
 
         if self.state == self.WARMUP:
             # Warmup MUST complete before any detection activity.
@@ -506,7 +536,7 @@ class DetectionCoordinator:
                     self._push_count = 0
                     self._pause_count = 0
                     _log(f"warmup done ({complete} trials) — became SENDER")
-                elif self._any_active_round():
+                elif self._has_active_sender():
                     self.state = self.RECEIVER_BASELINE
                     self._receiver_baseline_count = 0
                     _log(f"warmup done ({complete} trials) — became RECEIVER_BASELINE")
@@ -574,7 +604,7 @@ class DetectionCoordinator:
             return {'mode': 'optimize', 'params': None}
 
         if self.state == self.RECEIVER_HOLD:
-            if not self._any_active_round():
+            if not self._has_active_sender():
                 # Sender finished — enter POST baseline hold
                 self._receiver_post_count = 0
                 self.state = self.RECEIVER_POST
@@ -625,7 +655,7 @@ class DetectionCoordinator:
                     self._push_count = 0
                     self._pause_count = 0
                     _log(f"RECOVER done ({self._recover_count} trials) — became SENDER")
-                elif self._any_active_round():
+                elif self._has_active_sender():
                     self.state = self.RECEIVER_BASELINE
                     self._receiver_baseline_count = 0
                     _log(f"RECOVER done ({self._recover_count} trials) — became RECEIVER_BASELINE")
