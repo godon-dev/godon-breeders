@@ -154,6 +154,14 @@ class DetectionCoordinator:
 
     # Fixed lock key for sender coordination
     SENDER_LOCK_KEY = 42000
+    
+    # Safety limits — no state runs forever
+    MAX_PUSH_ATTEMPTS = 20       # Hard cap on push trials (including FAILs)
+    MAX_PAUSE_TRIALS = 20        # Hard cap on pause trials
+    MAX_HOLD_TRIALS = 100        # Hard cap on receiver hold before giving up
+    MAX_RECOVER_TRIALS = 15      # Hard cap on recovery phase
+    MAX_RECEIVER_BASELINE = 15   # Hard cap on pre-impulse baseline
+    MAX_RECEIVER_POST = 15       # Hard cap on post-impulse baseline
 
     def _try_start_round(self) -> bool:
         """Try to become the sender using a PostgreSQL advisory lock.
@@ -479,18 +487,10 @@ class DetectionCoordinator:
             self._initialized = True
 
         if self.state == self.WARMUP:
-            # Even during warmup, check if another breeder started a round.
-            # If they did, become receiver immediately — our optimize trials
-            # are contaminating their measurement window.
-            if self._any_active_round() and self._baseline_params is None:
-                # Try to get a baseline from whatever trials we have
-                self._refresh_baseline_db()
-            if self._any_active_round() and self._baseline_params is not None:
-                self.state = self.RECEIVER_BASELINE
-                self._receiver_baseline_count = 0
-                _log(f"warmup interrupted — became RECEIVER_BASELINE (other breeder active)")
-                return {'mode': 'hold', 'params': dict(self._baseline_params), 'hold_phase': 'baseline'}
-
+            # Warmup MUST complete before any detection activity.
+            # Do NOT check for active rounds during warmup — stale rounds
+            # from previous runs can trigger premature receiver mode.
+            
             # Count COMPLETE trials from DB — study.trials local cache is unreliable
             # with YugaByte (doesn't reflect all committed trials)
             complete = self._count_complete_trials_db()
@@ -526,6 +526,11 @@ class DetectionCoordinator:
                 self.state = self.SENDER_PAUSE
                 self._pause_count = 0
                 _log(f"SENDER_PUSH: push {self._push_count}/{self.push_block_size} — block complete, entering PAUSE")
+            elif self._push_count >= self.MAX_PUSH_ATTEMPTS:
+                # Safety: too many push attempts (all FAILing) — give up and complete round
+                logger.warning(f"SENDER_PUSH: hit MAX_PUSH_ATTEMPTS ({self.MAX_PUSH_ATTEMPTS}) — completing round early")
+                self.state = self.SENDER_DONE
+                _log(f"SENDER_PUSH: forced completion after {self._push_count} attempts")
             else:
                 _log(f"SENDER_PUSH: push {self._push_count}/{self.push_block_size}")
             return {'mode': 'impulse', 'params': params, 'impulse_phase': 'push'}
@@ -557,8 +562,10 @@ class DetectionCoordinator:
         if self.state == self.RECEIVER_BASELINE:
             # Pre-impulse baseline hold — receiver settles before sender pushes
             self._receiver_baseline_count += 1
-            if self._receiver_baseline_count >= self.receiver_baseline_trials:
+            if self._receiver_baseline_count >= self.receiver_baseline_trials or \
+               self._receiver_baseline_count >= self.MAX_RECEIVER_BASELINE:
                 self.state = self.RECEIVER_HOLD
+                self._hold_trial_count = 0
                 _log(f"RECEIVER_BASELINE: {self._receiver_baseline_count} trials done — entering RECEIVER_HOLD")
             else:
                 _log(f"RECEIVER_BASELINE: trial {self._receiver_baseline_count}/{self.receiver_baseline_trials}")
@@ -575,6 +582,14 @@ class DetectionCoordinator:
                 if self._baseline_params:
                     return {'mode': 'hold', 'params': dict(self._baseline_params), 'hold_phase': 'signal'}
                 return {'mode': 'optimize', 'params': None}
+            # Safety: don't hold forever if sender crashed without releasing lock
+            self._hold_trial_count = getattr(self, '_hold_trial_count', 0) + 1
+            if self._hold_trial_count > self.MAX_HOLD_TRIALS:
+                logger.warning(f"RECEIVER_HOLD: hit MAX_HOLD_TRIALS ({self.MAX_HOLD_TRIALS}) — giving up")
+                self._recover_count = 0
+                self.state = self.RECOVER
+                _log("RECEIVER_HOLD: forced recovery after too many hold trials")
+                return {'mode': 'optimize', 'params': None}
             if self._baseline_params is None:
                 self._refresh_baseline_db()
             if self._baseline_params is None:
@@ -586,7 +601,8 @@ class DetectionCoordinator:
 
         if self.state == self.RECEIVER_POST:
             self._receiver_post_count += 1
-            if self._receiver_post_count >= self.receiver_post_trials:
+            if self._receiver_post_count >= self.receiver_post_trials or \
+               self._receiver_post_count >= self.MAX_RECEIVER_POST:
                 self._recover_count = 0
                 self.state = self.RECOVER
                 _log(f"RECEIVER_POST: {self._receiver_post_count} trials done — entering RECOVER")
@@ -598,7 +614,8 @@ class DetectionCoordinator:
 
         if self.state == self.RECOVER:
             self._recover_count += 1
-            if self._recover_count >= self.recover_trials:
+            if self._recover_count >= self.recover_trials or \
+               self._recover_count >= self.MAX_RECOVER_TRIALS:
                 self._refresh_baseline_db()
                 if self._baseline_params is None:
                     _log(f"RECOVER: no baseline after {self._recover_count} trials — staying RECOVER")
@@ -624,11 +641,15 @@ class DetectionCoordinator:
         return {'mode': 'optimize', 'params': None}
 
     def on_guardrail_fail(self, params: Dict[str, Any]):
-        """Called when a trial fails guardrails. Scales down impulse if in push phase."""
+        """Called when a trial fails guardrails. Scales down impulse if in push phase.
+        
+        The push counter is NOT decremented — the trial happened, it just failed.
+        AIMD handles parameter adjustment separately. This ensures the push block
+        always completes regardless of FAIL rate.
+        """
         if self.state == self.SENDER_PUSH:
-            self._push_count = max(0, self._push_count - 1)
             self._aimd_backoff()
-            logger.info(f"Guardrail FAIL during push — AIMD backoff, retrying")
+            logger.info(f"Guardrail FAIL during push (trial {self._push_count}/{self.push_block_size}) — AIMD backoff to scale {self._impulse_scale:.2f}")
 
     def get_state(self) -> str:
         """Return current state for debugging/observability."""
