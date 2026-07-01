@@ -176,11 +176,14 @@ class DetectionCoordinator:
         def op(conn):
             cur = conn.cursor()
             # Acquire: lease is free if holder is NULL or lease expired
+            # NOTE: INTERVAL is built via string concat, not %d — psycopg2
+            # interprets %d as a parameter placeholder and fails.
             cur.execute(
                 "UPDATE sender_lease "
-                "SET holder = %s, token = token + 1, expires_at = NOW() + INTERVAL '%d seconds' "
+                "SET holder = %s, token = token + 1, "
+                "expires_at = NOW() + INTERVAL '" + str(self.LEASE_DURATION_SECONDS) + " seconds' "
                 "WHERE id = 1 AND (holder IS NULL OR expires_at < NOW())",
-                (self.breeder_id, self.LEASE_DURATION_SECONDS)
+                (self.breeder_id,)
             )
             updated = cur.rowcount
             if updated > 0:
@@ -205,9 +208,9 @@ class DetectionCoordinator:
             cur = conn.cursor()
             cur.execute(
                 "UPDATE sender_lease "
-                "SET expires_at = NOW() + INTERVAL '%d seconds' "
+                "SET expires_at = NOW() + INTERVAL '" + str(self.LEASE_DURATION_SECONDS) + " seconds' "
                 "WHERE id = 1 AND holder = %s AND token = %s",
-                (self.LEASE_DURATION_SECONDS, self.breeder_id, self._lease_token)
+                (self.breeder_id, self._lease_token)
             )
             result = cur.rowcount > 0
             cur.close()
