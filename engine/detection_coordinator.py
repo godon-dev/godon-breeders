@@ -587,9 +587,22 @@ class DetectionCoordinator:
             self._push_count = 0
             self._pause_count = 0
             self._impulse_params = None
-            self._recover_count = 0
-            self.state = self.RECOVER
-            _log("SENDER_DONE: round completed, entering RECOVER")
+            # Refresh baseline from completed trials, then immediately transition
+            # to next role — NO recover/optimize phase. This keeps the chart clean
+            # (no free trials between detection rounds).
+            self._refresh_baseline_db()
+            if self._try_start_round():
+                self.state = self.SENDER_PUSH
+                self._push_count = 0
+                self._pause_count = 0
+                _log("SENDER_DONE: released lease, reclaimed sender role")
+            else:
+                self.state = self.RECEIVER_BASELINE
+                self._receiver_baseline_count = 0
+                _log("SENDER_DONE: released lease, becoming RECEIVER_BASELINE")
+            # Return hold for this trial so we don't produce a free trial
+            if self._baseline_params:
+                return {'mode': 'hold', 'params': dict(self._baseline_params), 'hold_phase': 'baseline'}
             return {'mode': 'optimize', 'params': None}
 
         if self.state == self.RECEIVER_BASELINE:
@@ -619,9 +632,18 @@ class DetectionCoordinator:
             self._hold_trial_count = getattr(self, '_hold_trial_count', 0) + 1
             if self._hold_trial_count > self.MAX_HOLD_TRIALS:
                 logger.warning(f"RECEIVER_HOLD: hit MAX_HOLD_TRIALS ({self.MAX_HOLD_TRIALS}) — giving up")
-                self._recover_count = 0
-                self.state = self.RECOVER
-                _log("RECEIVER_HOLD: forced recovery after too many hold trials")
+                self._refresh_baseline_db()
+                if self._try_start_round():
+                    self.state = self.SENDER_PUSH
+                    self._push_count = 0
+                    self._pause_count = 0
+                    _log("RECEIVER_HOLD: forced sender after too many hold trials")
+                else:
+                    self.state = self.RECEIVER_BASELINE
+                    self._receiver_baseline_count = 0
+                    _log("RECEIVER_HOLD: forced re-receive after too many hold trials")
+                if self._baseline_params:
+                    return {'mode': 'hold', 'params': dict(self._baseline_params), 'hold_phase': 'baseline'}
                 return {'mode': 'optimize', 'params': None}
             if self._baseline_params is None:
                 self._refresh_baseline_db()
@@ -636,9 +658,20 @@ class DetectionCoordinator:
             self._receiver_post_count += 1
             if self._receiver_post_count >= self.receiver_post_trials or \
                self._receiver_post_count >= self.MAX_RECEIVER_POST:
-                self._recover_count = 0
-                self.state = self.RECOVER
-                _log(f"RECEIVER_POST: {self._receiver_post_count} trials done — entering RECOVER")
+                # Transition directly to next role — no RECOVER/optimize phase
+                self._refresh_baseline_db()
+                if self._try_start_round():
+                    self.state = self.SENDER_PUSH
+                    self._push_count = 0
+                    self._pause_count = 0
+                    _log(f"RECEIVER_POST: {self._receiver_post_count} trials done — became SENDER")
+                else:
+                    self.state = self.RECEIVER_BASELINE
+                    self._receiver_baseline_count = 0
+                    _log(f"RECEIVER_POST: {self._receiver_post_count} trials done — became RECEIVER_BASELINE")
+                # Return hold for this trial
+                if self._baseline_params:
+                    return {'mode': 'hold', 'params': dict(self._baseline_params), 'hold_phase': 'baseline'}
                 return {'mode': 'optimize', 'params': None}
             _log(f"RECEIVER_POST: trial {self._receiver_post_count}/{self.receiver_post_trials}")
             if self._baseline_params:
