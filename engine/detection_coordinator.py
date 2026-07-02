@@ -587,19 +587,14 @@ class DetectionCoordinator:
             self._push_count = 0
             self._pause_count = 0
             self._impulse_params = None
-            # Refresh baseline from completed trials, then immediately transition
-            # to next role — NO recover/optimize phase. This keeps the chart clean
-            # (no free trials between detection rounds).
+            # ALWAYS become receiver after sending. Never re-acquire the lease
+            # immediately — the other breeder needs its turn as sender.
+            # The receiver (in RECEIVER_HOLD) will detect the released lease
+            # and transition through RECEIVER_POST → try to acquire.
             self._refresh_baseline_db()
-            if self._try_start_round():
-                self.state = self.SENDER_PUSH
-                self._push_count = 0
-                self._pause_count = 0
-                _log("SENDER_DONE: released lease, reclaimed sender role")
-            else:
-                self.state = self.RECEIVER_BASELINE
-                self._receiver_baseline_count = 0
-                _log("SENDER_DONE: released lease, becoming RECEIVER_BASELINE")
+            self.state = self.RECEIVER_BASELINE
+            self._receiver_baseline_count = 0
+            _log("SENDER_DONE: released lease, becoming RECEIVER (yielding to other breeder)")
             # Return hold for this trial so we don't produce a free trial
             if self._baseline_params:
                 return {'mode': 'hold', 'params': dict(self._baseline_params), 'hold_phase': 'baseline'}
