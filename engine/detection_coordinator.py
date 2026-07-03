@@ -62,10 +62,10 @@ class DetectionCoordinator:
         # Config
         det_cfg = config.get('detection', {})
         self.warmup_target = det_cfg.get('warmup_trials', 15)
-        self.push_block_size = det_cfg.get('push_block_size', 5)
-        self.pause_block_size = det_cfg.get('pause_block_size', 5)
-        self.receiver_baseline_trials = det_cfg.get('receiver_baseline_trials', 3)
-        self.receiver_post_trials = det_cfg.get('receiver_post_trials', 3)
+        self.push_block_size = det_cfg.get('push_block_size', 15)
+        self.pause_block_size = det_cfg.get('pause_block_size', 15)
+        self.receiver_baseline_trials = det_cfg.get('receiver_baseline_trials', 5)
+        self.receiver_post_trials = det_cfg.get('receiver_post_trials', 5)
         self.recover_trials = det_cfg.get('recover_trials', 3)
 
         # State
