@@ -104,6 +104,7 @@ class BreederWorker:
             config=self.config,
             shared_db_fn=self._with_shared_db,
             collect_upper_bounds_fn=self._collect_upper_bounds,
+            compute_neutral_params_fn=self._compute_neutral_params,
         )
 
         self.run_id = config.get('run_id', 0)
@@ -317,6 +318,41 @@ class BreederWorker:
                 baseline[key] = (lower + upper) / 2.0
         return baseline
 
+    def _compute_neutral_params(self) -> Optional[Dict[str, Any]]:
+        """Compute neutral hold params in strain format (midpoints of constraint ranges).
+
+        These are the most passive safe operating point. The target becomes a
+        sensor, not an active controller. Used by the detection coordinator for
+        receiver hold and sender pause phases.
+        """
+        if not self.study or not self.study.trials:
+            return None
+
+        # Get template from any completed trial's effectuation params
+        template = None
+        for trial in self.study.trials:
+            if trial.state == TrialState.COMPLETE:
+                stashed = trial.user_attrs.get('effectuation_params')
+                if stashed:
+                    template = json.loads(stashed) if isinstance(stashed, str) else dict(stashed)
+                    break
+        if not template:
+            return None
+
+        # Walk settings to find all params with constraint ranges, override with midpoints
+        upper_bounds = self._collect_upper_bounds(self.config.get('settings', {}))
+        for ub in upper_bounds:
+            name = ub['name']
+            midpoint = (ub['lower'] + ub['upper']) / 2.0
+            if ub.get('is_int'):
+                midpoint = int(midpoint)
+            if name in template:
+                if isinstance(template[name], list):
+                    template[name] = [midpoint] * len(template[name])
+                else:
+                    template[name] = midpoint
+        return template
+
     def _register_interference_breeder(self):
         def op(conn):
             cur = conn.cursor()
@@ -358,151 +394,6 @@ class BreederWorker:
             return self._with_shared_db(op, "has_active_neighbors")
         except Exception:
             return False
-
-    def _get_detection_mode(self) -> str:
-        """Single source of truth for detection mode.
-
-        State machine:
-        - No active rounds → 'optimize' (warmup or between rounds)
-        - Own active round → 'impulse' (sender)
-        - Other's active round → 'hold' (receiver)
-        """
-        def op(conn):
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT sender_id FROM detection_rounds WHERE status = 'active' ORDER BY round_id ASC LIMIT 1"
-            )
-            row = cur.fetchone()
-            cur.close()
-            if row is None:
-                return 'optimize'
-            if row[0] == self.breeder_id:
-                return 'impulse'
-            return 'hold'
-        try:
-            return self._with_shared_db(op, "get_detection_mode")
-        except Exception as e:
-            logger.warning(f"Failed to read detection mode: {e}")
-            return 'optimize'
-
-    def _init_detection_if_ready(self, has_warmup: bool, current_mode: str) -> str:
-        """Manage detection lifecycle: cleanup, start rounds, yield turns.
-
-        Returns the (possibly updated) detection mode for this trial.
-        Called once per trial before mode-specific param generation.
-        """
-        if not has_warmup:
-            return current_mode
-
-        # First time entering detection: clean up stale controller rounds
-        if not getattr(self, '_detection_initialized', False):
-            def cleanup(conn):
-                cur = conn.cursor()
-                cur.execute("UPDATE detection_rounds SET status = 'completed', completed_at = NOW() WHERE status = 'active'")
-                cur.close()
-            try:
-                self._with_shared_db(cleanup, "cleanup_stale_rounds")
-                self._detection_initialized = True
-                logger.info("Detection initialized — cleaned stale rounds")
-            except Exception as e:
-                logger.warning(f"Failed to init detection: {e}")
-            return 'optimize'
-
-        # If no active rounds, try to start one (but yield to other breeders)
-        if current_mode == 'optimize':
-            def try_start(conn):
-                cur = conn.cursor()
-                # Check no active rounds
-                cur.execute("SELECT count(*) FROM detection_rounds WHERE status = 'active'")
-                if cur.fetchone()[0] > 0:
-                    cur.close()
-                    return False
-                # Don't grab if we were most recent sender
-                cur.execute("SELECT sender_id FROM detection_rounds ORDER BY round_id DESC LIMIT 1")
-                row = cur.fetchone()
-                if row and row[0] == self.breeder_id:
-                    cur.close()
-                    return False
-                cur.execute("INSERT INTO detection_rounds (sender_id) VALUES (%s)", (self.breeder_id,))
-                cur.close()
-                return True
-            try:
-                started = self._with_shared_db(try_start, "start_detection_round")
-                if started:
-                    logger.info("Started new detection round as sender")
-                    self._impulse_trials_in_round = 0
-                    self._calibrated_impulse_params = None
-                    self._impulse_scale = 1.0
-                    # Re-evaluate mode
-                    return self._get_detection_mode()
-            except Exception as e:
-                logger.warning(f"Failed to start round: {e}")
-
-        return current_mode
-
-    def _complete_detection_round(self):
-        """Complete own active round."""
-        def op(conn):
-            cur = conn.cursor()
-            cur.execute(
-                "UPDATE detection_rounds SET status = 'completed', completed_at = NOW() "
-                "WHERE sender_id = %s AND status = 'active'",
-                (self.breeder_id,)
-            )
-            cur.close()
-        try:
-            self._with_shared_db(op, "complete_detection_round")
-            logger.info("Detection round completed")
-        except Exception as e:
-            logger.warning(f"Failed to complete detection round: {e}")
-
-    def _flag_receiver_violation(self):
-        """Receiver flags sender's round on guardrail violation."""
-        def op(conn):
-            cur = conn.cursor()
-            cur.execute(
-                "UPDATE detection_rounds SET receiver_violated = TRUE "
-                "WHERE status = 'active' AND sender_id != %s",
-                (self.breeder_id,)
-            )
-            cur.close()
-        try:
-            self._with_shared_db(op, "flag_receiver_violation")
-        except Exception as e:
-            logger.warning(f"Failed to flag receiver violation: {e}")
-
-    def _check_receiver_violation(self) -> bool:
-        """Sender checks if receiver flagged violation."""
-        def op(conn):
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT receiver_violated FROM detection_rounds "
-                "WHERE status = 'active' AND sender_id = %s LIMIT 1",
-                (self.breeder_id,)
-            )
-            row = cur.fetchone()
-            cur.close()
-            return row[0] if row else False
-        try:
-            return self._with_shared_db(op, "check_receiver_violation")
-        except Exception as e:
-            logger.warning(f"Failed to check receiver violation: {e}")
-            return False
-
-    def _clear_receiver_violation(self):
-        """Sender clears receiver violation flag after processing."""
-        def op(conn):
-            cur = conn.cursor()
-            cur.execute(
-                "UPDATE detection_rounds SET receiver_violated = FALSE "
-                "WHERE status = 'active' AND sender_id = %s",
-                (self.breeder_id,)
-            )
-            cur.close()
-        try:
-            self._with_shared_db(op, "clear_receiver_violation")
-        except Exception as e:
-            logger.warning(f"Failed to clear receiver violation: {e}")
 
     def _get_last_successful_params(self) -> Optional[Dict[str, Any]]:
         """Get effectuation params from the best warmup trial for hold mode.
@@ -551,45 +442,6 @@ class BreederWorker:
                 return dict(trial.params)
         return None
 
-    def _generate_impulse_params(self, settings: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Generate params pushed to upper bounds for impulse mode.
-
-        Takes the last strain-formatted params as template (correct structure,
-        per-zone lists, etc), then overrides the top-3 params by range to
-        their upper bounds from the config constraints.
-        """
-        if not self.study or not self.study.trials:
-            return None
-
-        # Get the last strain-formatted params as template
-        stashed = None
-        for trial in reversed(self.study.trials):
-            if trial.state == TrialState.COMPLETE:
-                stashed = trial.user_attrs.get('effectuation_params')
-                break
-
-        if not stashed:
-            return None
-
-        params = json.loads(stashed) if isinstance(stashed, str) else dict(stashed)
-
-        # Collect upper bounds from config and override top-3 by range
-        upper_bounds = self._collect_upper_bounds(settings)
-        upper_bounds.sort(key=lambda x: x.get('range', 0), reverse=True)
-
-        for ub in upper_bounds[:3]:
-            name = ub['name']
-            value = ub['upper']
-            if ub.get('is_int'):
-                value = int(value)
-            if name in params:
-                if isinstance(params[name], list):
-                    params[name] = [value] * len(params[name])
-                else:
-                    params[name] = value
-
-        return params if params else None
-
     def _collect_upper_bounds(self, obj: Any, depth: int = 0) -> list:
         """Recursively walk config tree and collect params with upper bounds."""
         results = []
@@ -615,124 +467,6 @@ class BreederWorker:
             else:
                 results.extend(self._collect_upper_bounds(val, depth + 1))
         return results
-
-    def _get_calibrated_impulse_params(self) -> Optional[Dict[str, Any]]:
-        """Get impulse params — pulsed pattern like sonar: ping then listen.
-        
-        Even trials (0,2,4): extreme params (the ping)
-        Odd trials (1,3,5): baseline params (the listen period)
-        """
-        if not self.study or not self.study.trials:
-            return None
-
-        baseline = self._get_last_successful_params()
-        if baseline is None:
-            return None
-
-        # Alternate: even = ping (extreme), odd = listen (baseline)
-        is_ping = self._impulse_trials_in_round % 2 == 0
-
-        if not is_ping:
-            # Listen period — same params as hold mode
-            return dict(baseline)
-
-        # Ping — generate extreme params from baseline
-        if self._calibrated_impulse_params is not None:
-            return self._calibrated_impulse_params
-
-        upper_bounds = self._collect_upper_bounds(self.config.get('settings', {}))
-        upper_bounds.sort(key=lambda x: x.get('range', 0), reverse=True)
-
-        params = dict(baseline)
-        for ub in upper_bounds[:3]:
-            name = ub['name']
-            value = ub['upper'] * self._impulse_scale
-            if ub.get('is_int'):
-                value = int(value)
-            if name in params:
-                if isinstance(params[name], list):
-                    params[name] = [value] * len(params[name])
-                else:
-                    params[name] = value
-
-        self._calibrated_impulse_params = params
-        self._impulse_base_params = dict(baseline)
-        logger.info(f"Calibrated impulse params at scale {self._impulse_scale:.2f}: {list(params.keys())}")
-        return params
-
-    def _get_calibrated_hold_params(self) -> Optional[Dict[str, Any]]:
-        """Get calibrated hold params — median of last N successful optimize trials.
-
-        Uses stashed effectuation_params to get correct format.
-        Returns None if not enough trials exist yet.
-        """
-        if self._calibrated_hold_params is not None:
-            return self._calibrated_hold_params
-
-        if not self.study or not self.study.trials:
-            return None
-
-        # Collect last 3 successful stashed params
-        successful = []
-        for trial in reversed(self.study.trials):
-            if trial.state == TrialState.COMPLETE and len(successful) < 3:
-                stashed = trial.user_attrs.get('effectuation_params')
-                if stashed:
-                    p = json.loads(stashed) if isinstance(stashed, str) else stashed
-                    successful.append(p)
-
-        if not successful:
-            return None
-
-        if len(successful) == 1:
-            self._calibrated_hold_params = successful[0]
-            return self._calibrated_hold_params
-
-        # Median of numeric values across the successful trials
-        import statistics
-        result = dict(successful[0])
-        for key in result:
-            if isinstance(result[key], list):
-                lists = [s[key] for s in successful if key in s and isinstance(s[key], list)]
-                if lists:
-                    result[key] = [statistics.median(vals) for vals in zip(*lists)]
-            elif isinstance(result[key], (int, float)):
-                vals = [s[key] for s in successful if key in s and isinstance(s[key], (int, float))]
-                if vals:
-                    result[key] = statistics.median(vals)
-
-        self._calibrated_hold_params = result
-        logger.info(f"Calibrated hold params from {len(successful)} trials (median): {list(result.keys())}")
-        return result
-
-    def _impulse_aimd_backoff(self):
-        """AIMD multiplicative decrease — called on impulse FAIL."""
-        self._impulse_scale *= 0.5
-        # Re-scale from the original base params, don't pick a new template
-        if self._impulse_base_params is not None:
-            upper_bounds = self._collect_upper_bounds(self.config.get('settings', {}))
-            upper_bounds.sort(key=lambda x: x.get('range', 0), reverse=True)
-            params = dict(self._impulse_base_params)
-            for ub in upper_bounds[:3]:
-                name = ub['name']
-                value = ub['upper'] * self._impulse_scale
-                if ub.get('is_int'):
-                    value = int(value)
-                if name in params:
-                    if isinstance(params[name], list):
-                        params[name] = [value] * len(params[name])
-                    else:
-                        params[name] = value
-            self._calibrated_impulse_params = params
-            logger.warning(f"Impulse FAIL — AIMD backoff to scale {self._impulse_scale:.2f}")
-        else:
-            self._calibrated_impulse_params = None
-            logger.warning(f"Impulse FAIL — AIMD backoff to scale {self._impulse_scale:.2f}, no base params")
-
-        if self._impulse_scale < 0.1:
-            logger.error("Impulse scale below minimum, giving up on detection")
-            return False
-        return True
 
     def _load_or_create_study(self) -> optuna.Study:
         parallel_workers = self.config.get('run', {}).get('parallel', 1)
@@ -1237,53 +971,33 @@ class BreederWorker:
                 params = None
 
                 try:
-                    # === Detection Coordinator (clean state machine) ===
-                    decision = self._detection_coordinator.decide_trial(trial, self.study)
+                    # === Detection Coordinator ===
+                    decision = self._detection_coordinator.decide_trial(trial)
                     detection_mode = decision['mode']
 
-                    # ALWAYS tag detection_mode on the trial — even if params
-                    # are None. Without this, hold trials with no baseline
-                    # params are indistinguishable from optimize trials.
+                    # Tag trial for observer
                     trial.set_user_attr('detection_mode', detection_mode)
                     if decision.get('impulse_phase'):
                         trial.set_user_attr('impulse_phase', decision['impulse_phase'])
-                    if decision.get('hold_phase'):
-                        trial.set_user_attr('hold_phase', decision['hold_phase'])
 
-                    if decision.get('skip'):
-                        # Coordinator says skip — no baseline params available.
-                        # Mark trial as FAIL rather than running random params
-                        # that would contaminate the hold baseline.
-                        logger.warning(f"Trial {trial.number} skipped — {detection_mode} mode has no params")
-                        self._retry_op(
-                            lambda: self.study.tell(trial, state=TrialState.FAIL),
-                            f"study.tell FAIL skip (trial {trial.number})"
-                        )
-                        continue
-
-                    if decision.get('params'):
-                        params = decision['params']
-                    elif detection_mode == 'hold':
-                        # Hold mode but coordinator returned no params (and didn't set skip).
-                        # Use the last successful trial's effectuation params
-                        # as a stable baseline instead of random optimization.
-                        fallback = self._get_last_successful_params()
-                        if fallback:
-                            params = fallback
-                            logger.info(f"Hold mode: using last successful params as fallback baseline")
-                        else:
-                            # No params at all — FAIL the trial, do NOT optimize randomly.
-                            # Random params during hold contaminate the baseline and
-                            # destroy the matched filter's ability to detect coupling.
-                            logger.error(f"Hold mode: no fallback params — FAILing trial to avoid baseline contamination")
+                    if detection_mode == 'optimize':
+                        # Normal optimization — sampler picks params
+                        params = self.strain.suggest_params(trial, self.config.get('settings', {}))
+                    else:
+                        # Hold or impulse mode — coordinator provides params
+                        params = decision.get('params')
+                        if not params:
+                            # Coordinator should always provide params for non-optimize modes.
+                            # FAIL to avoid random params contaminating detection.
+                            logger.error(
+                                f"Trial {trial.number}: mode={detection_mode} but no params "
+                                f"from coordinator — FAILing"
+                            )
                             self._retry_op(
                                 lambda: self.study.tell(trial, state=TrialState.FAIL),
-                                f"study.tell FAIL no-params (trial {trial.number})"
+                                f"study.tell FAIL no-coordinator-params (trial {trial.number})"
                             )
                             continue
-
-                    if not params:
-                        params = self.strain.suggest_params(trial, self.config.get('settings', {}))
 
                     if not self.watermark and self._has_active_neighbors():
                         self.watermark = create_watermark(self.config, self.config.get('settings', {}), breeder_uuid=self.breeder_uuid)
