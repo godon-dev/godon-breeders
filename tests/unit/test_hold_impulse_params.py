@@ -125,23 +125,25 @@ class TestImpulseParamsFormat:
         trial = _make_trial(user_attrs={'effectuation_params': json.dumps(template)})
         worker = _make_worker_with_trials([trial])
 
-        result = worker._generate_impulse_params(_greenhouse_settings())
+        result = worker._compute_neutral_params()
         assert result is not None
         assert isinstance(result['heating_setpoints'], list)
 
-    def test_overrides_top3_to_upper_bounds(self):
+    def test_overrides_to_midpoints(self):
         template = {'heating_setpoints': [11.0, 13.5], 'co2_injection': 3.5, 'vent_openings': [0.5, 0.6]}
         trial = _make_trial(user_attrs={'effectuation_params': json.dumps(template)})
         worker = _make_worker_with_trials([trial])
 
-        result = worker._generate_impulse_params(_greenhouse_settings())
+        result = worker._compute_neutral_params()
         assert result is not None
-        assert result['heating_setpoints'] == [40.0, 40.0]
-        assert result['co2_injection'] == 20.0
+        # heating_setpoints midpoint of [5, 40] = 22.5
+        assert result['heating_setpoints'] == [22.5, 22.5]
+        # co2_injection midpoint of [0, 20] = 10.0
+        assert result['co2_injection'] == 10.0
 
     def test_returns_none_without_prior_trial(self):
         worker = _make_worker_with_trials([])
-        result = worker._generate_impulse_params(_greenhouse_settings())
+        result = worker._compute_neutral_params()
         assert result is None
 
 
