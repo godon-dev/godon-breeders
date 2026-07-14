@@ -596,6 +596,7 @@ class DetectionCoordinator:
             return {
                 'mode': 'impulse', 'params': params,
                 'impulse_phase': 'impulse_calib',
+                'impulse_scale': self._calib_scale,
                 'detection_trial': True,
             }
 
@@ -625,6 +626,7 @@ class DetectionCoordinator:
             return {
                 'mode': 'impulse', 'params': params,
                 'impulse_phase': 'impulse_calib',
+                'impulse_scale': self._calib_scale,
                 'detection_trial': True,
             }
 
@@ -665,6 +667,7 @@ class DetectionCoordinator:
         return {
             'mode': 'impulse', 'params': params,
             'impulse_phase': 'push',
+            'impulse_scale': self._locked_scale,
             'detection_trial': True,
         }
 
@@ -767,11 +770,12 @@ class DetectionCoordinator:
         else:
             self._hold_calib_receiver_count = 0
 
-        # Receiver hold has no impulse_phase — the observer identifies receiver
-        # trials by detection_mode='hold' and splits them by sender timestamps.
+        # Receiver hold — tag with the lease phase we observed so we can trace
+        # whether the receiver correctly saw push/pause/hold_calib from the sender.
         return {
             'mode': 'hold', 'params': dict(params),
             'impulse_phase': None,
+            'lease_phase': phase,
             'detection_trial': True,
         }
 

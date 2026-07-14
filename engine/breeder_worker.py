@@ -977,8 +977,13 @@ class BreederWorker:
 
                     # Tag trial for observer
                     trial.set_user_attr('detection_mode', detection_mode)
+                    trial.set_user_attr('coord_state', self._detection_coordinator.get_state())
                     if decision.get('impulse_phase'):
                         trial.set_user_attr('impulse_phase', decision['impulse_phase'])
+                    if decision.get('impulse_scale') is not None:
+                        trial.set_user_attr('impulse_scale', decision['impulse_scale'])
+                    if decision.get('lease_phase') is not None:
+                        trial.set_user_attr('lease_phase', decision['lease_phase'])
 
                     if detection_mode == 'optimize':
                         # Normal optimization — sampler picks params
