@@ -1096,6 +1096,10 @@ class BreederWorker:
                         # Stash effectuation params BEFORE study.tell — trial is frozen after tell
                         trial.set_user_attr('effectuation_params', json.dumps(params))
 
+                        # Feed objective values to coordinator for hold calibration
+                        if self._detection_coordinator:
+                            self._detection_coordinator.record_calib_observation(values)
+
                         self._retry_op(
                             lambda: self.study.tell(trial, values),
                             f"study.tell (trial {trial.number})"

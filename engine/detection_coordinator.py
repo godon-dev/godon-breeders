@@ -56,6 +56,12 @@ class DetectionCoordinator:
     MIN_IMPULSE_SCALE = 0.125
     MAX_HOLD_TRIALS = 100
     MAX_CALIB_WAIT = 30  # extra trials beyond hold_calib_trials to wait for partner
+    MAX_HOLD_CALIB_SEARCH = 40  # max hold_calib trials before giving up on flat params
+
+    # Hold calibration: how flat the signal must be
+    MAX_CALIB_STD = 0.05    # objective std must be below this to accept params
+    MIN_CALIB_SAMPLES = 5   # need at least this many samples to evaluate flatness
+    CALIB_STEP_FACTOR = 0.5  # how much to reduce each param on each flatness fail
 
     def __init__(
         self,
@@ -100,6 +106,11 @@ class DetectionCoordinator:
 
         # Params (computed once, cached)
         self._neutral_params = None
+
+        # Hold calibration — objective values observed during hold_calib
+        self._calib_values = []  # list of (objective_index, value) tuples
+        self._calib_evaluated = False
+        self._calib_params_locked = False
 
         # Lease
         self._lease_token = 0
@@ -529,12 +540,77 @@ class DetectionCoordinator:
 
     # ── HOLD_CALIB (sender) ──────────────────────────────────────────
 
-    def _handle_hold_calib(self, trial) -> Dict[str, Any]:
-        """Sender: hold neutral params, wait for partner readiness barrier.
+    def _evaluate_hold_flatness(self) -> bool:
+        """Evaluate whether current hold params produce a flat enough signal.
 
-        Both breeders hold at neutral params. This lets the targets settle from
-        optimization mode to passive mode. After hold_calib_trials, signal
-        readiness. When all active breeders are ready, proceed to IMPULSE_CALIB.
+        Collects objective values from hold_calib trials and checks if the std
+        of the primary objective (obj0) is below MAX_CALIB_STD.
+        Returns True if params are good enough, False if too noisy.
+        """
+        if len(self._calib_values) < self.MIN_CALIB_SAMPLES:
+            return False
+
+        import statistics
+        # Evaluate first objective (growth_rate) — the coupling-sensitive one
+        obj0_vals = [v for idx, v in self._calib_values if idx == 0]
+        if len(obj0_vals) < self.MIN_CALIB_SAMPLES:
+            return False
+
+        std = statistics.stdev(obj0_vals) if len(obj0_vals) >= 2 else 999
+        mean = statistics.mean(obj0_vals)
+        # Normalized std — relative to mean, so it works across scales
+        norm_std = std / max(abs(mean), 0.01)
+        logger.info(
+            f"HOLD_CALIB flatness check: obj0 mean={mean:.4f} std={std:.4f} "
+            f"norm_std={norm_std:.4f} (threshold {self.MAX_CALIB_STD})"
+        )
+        return norm_std <= self.MAX_CALIB_STD
+
+    def _adjust_hold_params(self):
+        """Current hold params are too noisy — shift toward lower bounds.
+
+        For each param, reduce by CALIB_STEP_FACTOR toward the lower bound.
+        This moves the system toward a more passive operating point.
+        """
+        if self._neutral_params is None:
+            return
+
+        upper_bounds = self._collect_upper_bounds(self.config.get('settings', {}))
+        ub_map = {ub['name']: ub for ub in upper_bounds}
+
+        changed = False
+        for name, value in list(self._neutral_params.items()):
+            if name not in ub_map:
+                continue
+            ub = ub_map[name]
+            lower = ub['lower']
+            upper = ub['upper']
+            # Move value toward lower bound by CALIB_STEP_FACTOR
+            new_value = lower + (value - lower) * (1.0 - self.CALIB_STEP_FACTOR)
+            if ub.get('is_int'):
+                new_value = int(new_value)
+            if isinstance(self._neutral_params[name], list):
+                self._neutral_params[name] = [new_value] * len(self._neutral_params[name])
+            else:
+                self._neutral_params[name] = new_value
+            changed = True
+
+        if changed:
+            # Clear collected values — start fresh measurement at new params
+            self._calib_values = []
+            logger.info(
+                "HOLD_CALIB: params too noisy — shifted toward lower bounds"
+            )
+
+    def _handle_hold_calib(self, trial) -> Dict[str, Any]:
+        """Sender: hold neutral params, measure flatness, search for stable params.
+
+        Runs hold trials at candidate params. After MIN_CALIB_SAMPLES, evaluates
+        whether the signal is flat enough for detection. If not, adjusts params
+        toward lower bounds (more passive) and tries again.
+
+        Once params are locked (flat enough) AND the partner signals readiness,
+        proceed to IMPULSE_CALIB.
         """
         params = self._get_neutral_params()
         if not params:
@@ -545,12 +621,30 @@ class DetectionCoordinator:
         self._set_lease_phase(self.HOLD_CALIB)
         self._hold_calib_count += 1
 
-        # Signal readiness after enough hold trials
-        if (self._hold_calib_count >= self.hold_calib_trials
-                and not self._ready_signaled):
+        # After enough trials at current params, evaluate flatness
+        if (self._hold_calib_count >= self.MIN_CALIB_SAMPLES
+                and not self._calib_params_locked):
+            if self._evaluate_hold_flatness():
+                self._calib_params_locked = True
+                logger.info("HOLD_CALIB: params locked — signal is flat enough")
+            else:
+                # Too noisy — adjust and continue holding
+                self._adjust_hold_params()
+                params = self._get_neutral_params()
+
+                # Safety: don't search forever
+                if self._hold_calib_count > self.MAX_HOLD_CALIB_SEARCH:
+                    logger.warning(
+                        "HOLD_CALIB: could not find flat params after "
+                        f"{self._hold_calib_count} trials — accepting best effort"
+                    )
+                    self._calib_params_locked = True
+
+        # Signal readiness once params are locked
+        if self._calib_params_locked and not self._ready_signaled:
             self._signal_ready(self.HOLD_CALIB)
             self._ready_signaled = True
-            logger.info("HOLD_CALIB: signaled readiness")
+            logger.info("HOLD_CALIB: signaled readiness (params locked)")
 
         # Check barrier
         if self._ready_signaled and self._check_all_ready(self.HOLD_CALIB):
@@ -573,6 +667,18 @@ class DetectionCoordinator:
             'impulse_phase': 'hold_calib',
             'detection_trial': True,
         }
+
+    def record_calib_observation(self, trial_values: list):
+        """Called by the worker after each hold_calib trial completes.
+
+        Stores objective values for the flatness evaluation.
+        """
+        if not self._calib_params_locked:
+            for idx, val in enumerate(trial_values):
+                if val is not None:
+                    self._calib_values.append((idx, float(val)))
+            logger.debug(f"HOLD_CALIB: recorded {len(trial_values)} objective values "
+                        f"(total samples: {len(self._calib_values)})")
 
     # ── IMPULSE_CALIB (sender) ───────────────────────────────────────
 
