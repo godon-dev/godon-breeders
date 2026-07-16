@@ -585,13 +585,16 @@ class DetectionCoordinator:
             ub = ub_map[name]
             lower = ub['lower']
             upper = ub['upper']
-            # Move value toward lower bound by CALIB_STEP_FACTOR
-            new_value = lower + (value - lower) * (1.0 - self.CALIB_STEP_FACTOR)
-            if ub.get('is_int'):
-                new_value = int(new_value)
-            if isinstance(self._neutral_params[name], list):
-                self._neutral_params[name] = [new_value] * len(self._neutral_params[name])
+            # Handle both scalar and list params (per-zone)
+            if isinstance(value, list):
+                new_vals = [lower + (v - lower) * (1.0 - self.CALIB_STEP_FACTOR) for v in value]
+                if ub.get('is_int'):
+                    new_vals = [int(v) for v in new_vals]
+                self._neutral_params[name] = new_vals
             else:
+                new_value = lower + (value - lower) * (1.0 - self.CALIB_STEP_FACTOR)
+                if ub.get('is_int'):
+                    new_value = int(new_value)
                 self._neutral_params[name] = new_value
             changed = True
 
