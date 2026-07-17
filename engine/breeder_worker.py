@@ -1065,6 +1065,20 @@ class BreederWorker:
                         if guardrail_readings:
                             trial.set_user_attr('guardrails', json.dumps(guardrail_readings))
 
+                    # Collect observation signals for coupling detection.
+                    # These are NOT objectives — not fed to optuna.
+                    # Stored as trial user_attrs for the observer to read.
+                    observations_config = self.config.get('observations', [])
+                    if observations_config:
+                        observation_readings = {}
+                        for obs in observations_config:
+                            oname = obs.get('name', 'unknown')
+                            oval = metrics.get(oname)
+                            if oval is not None:
+                                observation_readings[oname] = oval
+                        if observation_readings:
+                            trial.set_user_attr('observations', json.dumps(observation_readings))
+
                     if guardrails_violated:
                         logger.error(f"Trial {trial.number} failed guardrails: {violations}")
                         self._retry_op(
