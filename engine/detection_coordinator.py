@@ -543,41 +543,63 @@ class DetectionCoordinator:
     def _evaluate_hold_flatness(self) -> bool:
         """Evaluate whether current hold params produce a flat enough signal.
 
-        Collects objective values from hold_calib trials and checks if the std
-        of the primary objective (obj0) is below MAX_CALIB_STD.
-        Returns True if params are good enough, False if too noisy.
+        Two criteria:
+        1. System must be alive (obj0 mean > MIN_CALIB_MEAN)
+        2. Signal must be quiet (obj0 absolute std < MAX_CALIB_STD)
         """
         if len(self._calib_values) < self.MIN_CALIB_SAMPLES:
             return False
 
         import statistics
-        # Evaluate first objective (growth_rate) — the coupling-sensitive one
         obj0_vals = [v for idx, v in self._calib_values if idx == 0]
         if len(obj0_vals) < self.MIN_CALIB_SAMPLES:
             return False
 
         std = statistics.stdev(obj0_vals) if len(obj0_vals) >= 2 else 999
         mean = statistics.mean(obj0_vals)
-        # Normalized std — relative to mean, so it works across scales
-        norm_std = std / max(abs(mean), 0.01)
         logger.info(
             f"HOLD_CALIB flatness check: obj0 mean={mean:.4f} std={std:.4f} "
-            f"norm_std={norm_std:.4f} (threshold {self.MAX_CALIB_STD})"
+            f"(need mean > 0.1 AND std < {self.MAX_CALIB_STD})"
         )
-        return norm_std <= self.MAX_CALIB_STD
+        # Must be alive AND quiet
+        if mean < 0.1:
+            logger.info(f"HOLD_CALIB: system dead (mean={mean:.4f} < 0.1) — rejecting")
+            return False
+        return std <= self.MAX_CALIB_STD
 
     def _adjust_hold_params(self):
-        """Current hold params are too noisy — shift toward lower bounds.
+        """Current hold params are too noisy or system is dead — adjust.
 
-        For each param, reduce by CALIB_STEP_FACTOR toward the lower bound.
-        This moves the system toward a more passive operating point.
+        If system is dead (mean ~0), shift back toward midpoints.
+        If system is noisy, shift toward lower bounds.
         """
         if self._neutral_params is None:
             return
 
+        import statistics
+        obj0_vals = [v for idx, v in self._calib_values if idx == 0]
+        mean = statistics.mean(obj0_vals) if obj0_vals else 0.0
+
         upper_bounds = self._collect_upper_bounds(self.config.get('settings', {}))
         ub_map = {ub['name']: ub for ub in upper_bounds}
 
+        # If dead, reset to midpoints
+        if mean < 0.1:
+            for name in list(self._neutral_params.keys()):
+                if name in ub_map:
+                    ub = ub_map[name]
+                    midpoint = (ub['lower'] + ub['upper']) / 2.0
+                    if ub.get('is_int'):
+                        midpoint = int(midpoint)
+                    if isinstance(self._neutral_params[name], list):
+                        self._neutral_params[name] = [midpoint] * len(self._neutral_params[name])
+                    else:
+                        self._neutral_params[name] = midpoint
+            self._calib_values = []
+            logger.info("HOLD_CALIB: system dead — resetting to midpoints")
+            return
+
+        # If noisy, shift toward lower bounds
         changed = False
         for name, value in list(self._neutral_params.items()):
             if name not in ub_map:
@@ -585,7 +607,6 @@ class DetectionCoordinator:
             ub = ub_map[name]
             lower = ub['lower']
             upper = ub['upper']
-            # Handle both scalar and list params (per-zone)
             if isinstance(value, list):
                 new_vals = [lower + (v - lower) * (1.0 - self.CALIB_STEP_FACTOR) for v in value]
                 if ub.get('is_int'):
@@ -599,11 +620,8 @@ class DetectionCoordinator:
             changed = True
 
         if changed:
-            # Clear collected values — start fresh measurement at new params
             self._calib_values = []
-            logger.info(
-                "HOLD_CALIB: params too noisy — shifted toward lower bounds"
-            )
+            logger.info("HOLD_CALIB: params too noisy — shifted toward lower bounds")
 
     def _handle_hold_calib(self, trial) -> Dict[str, Any]:
         """Sender: hold neutral params, measure flatness, search for stable params.
