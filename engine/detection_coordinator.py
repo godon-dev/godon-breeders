@@ -79,7 +79,7 @@ class DetectionCoordinator:
         self._breeder_db_name = f"breeder_{breeder_id.replace('-', '_')}"
 
         # Config
-        det_cfg = config.get('detection', {})
+        det_cfg = config.get('interference_detection', config.get('detection', {}))
         self.min_optimize_trials = det_cfg.get('min_optimize_trials', 15)
         self.hold_calib_trials = det_cfg.get('hold_calib_trials', 5)
         self.push_block_size = det_cfg.get('push_block_size', 15)
@@ -378,7 +378,7 @@ class DetectionCoordinator:
             return self._neutral_params
 
         # Check config override first
-        det_cfg = self.config.get('detection', {})
+        det_cfg = self.config.get('interference_detection', self.config.get('detection', {}))
         hold_params = det_cfg.get('hold_params')
         if hold_params:
             self._neutral_params = hold_params
