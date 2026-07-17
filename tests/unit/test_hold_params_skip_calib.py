@@ -159,7 +159,7 @@ class TestHoldParamsSkipCalib:
                 signal_mock.assert_called_once_with(coord.HOLD_CALIB)
 
     def test_proceeds_to_impulse_when_partner_ready(self):
-        """When config hold_params + partner ready, go straight to impulse on trial 2."""
+        """When config hold_params + partner ready, go straight to impulse."""
         coord = _make_coord(hold_params={'heating': 20.0})
         coord.state = coord.HOLD_CALIB
         coord._hold_calib_count = 0
@@ -167,16 +167,11 @@ class TestHoldParamsSkipCalib:
         with patch.object(coord, '_set_lease_phase'), \
              patch.object(coord, '_signal_ready'), \
              patch.object(coord, '_check_all_ready', return_value=True):
-            # Trial 1: locks params, signals ready
-            trial1 = MockTrial(0)
-            coord._handle_hold_calib(trial1)
+            # Trial 1: locks params, signals ready, barrier passes → IMPULSE_CALIB
+            trial = MockTrial(0)
+            coord._handle_hold_calib(trial)
+
             assert coord._calib_params_locked is True
-            assert coord.state == coord.HOLD_CALIB  # not enough yet
-
-            # Trial 2: barrier passes → should transition to IMPULSE_CALIB
-            trial2 = MockTrial(1)
-            coord._handle_hold_calib(trial2)
-
             assert coord.state == coord.IMPULSE_CALIB, \
                 f"Should be in IMPULSE_CALIB, got {coord.state}"
 
