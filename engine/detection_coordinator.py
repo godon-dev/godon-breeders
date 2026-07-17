@@ -1,3 +1,22 @@
+
+#
+# Copyright (c) 2019 Matthias Tafelmeier.
+#
+# This file is part of godon
+#
+# godon is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the
+# License, or (at your option) any later version.
+#
+# godon is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Affero General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this godon. If not, see <http://www.gnu.org/licenses/>.
+#
 """
 Detection Coordinator — Phase-based state machine for coordinated interference detection.
 
@@ -106,6 +125,7 @@ class DetectionCoordinator:
 
         # Params (computed once, cached)
         self._neutral_params = None
+        self._hold_params_from_config = False  # True when hold_params came from YAML
 
         # Hold calibration — objective values observed during hold_calib
         self._calib_values = []  # list of (objective_index, value) tuples
@@ -382,7 +402,8 @@ class DetectionCoordinator:
         hold_params = det_cfg.get('hold_params')
         if hold_params:
             self._neutral_params = hold_params
-            logger.info("Using config-specified hold params (skipping midpoint computation)")
+            self._hold_params_from_config = True
+            logger.info("Using config-specified hold params (skipping calibration search)")
             return hold_params
 
         if self._compute_neutral_params_fn:
@@ -634,14 +655,13 @@ class DetectionCoordinator:
             logger.info("HOLD_CALIB: params too noisy — shifted toward lower bounds")
 
     def _handle_hold_calib(self, trial) -> Dict[str, Any]:
-        """Sender: hold neutral params, measure flatness, search for stable params.
+        """Sender: hold neutral params, wait for partner readiness.
 
-        Runs hold trials at candidate params. After MIN_CALIB_SAMPLES, evaluates
-        whether the signal is flat enough for detection. If not, adjusts params
-        toward lower bounds (more passive) and tries again.
+        When hold_params come from config (user-specified), skip the
+        flatness search entirely — params are known, just lock and proceed.
 
-        Once params are locked (flat enough) AND the partner signals readiness,
-        proceed to IMPULSE_CALIB.
+        When hold_params are computed (midpoints/callback), run the
+        flatness search to find stable params before proceeding.
         """
         params = self._get_neutral_params()
         if not params:
@@ -652,8 +672,12 @@ class DetectionCoordinator:
         self._set_lease_phase(self.HOLD_CALIB)
         self._hold_calib_count += 1
 
-        # After enough trials at current params, evaluate flatness
-        if (self._hold_calib_count >= self.MIN_CALIB_SAMPLES
+        # If params came from config, skip calibration search — trust the user
+        if self._hold_params_from_config:
+            if not self._calib_params_locked:
+                self._calib_params_locked = True
+                logger.info("HOLD_CALIB: params from config — skipping flatness search")
+        elif (self._hold_calib_count >= self.MIN_CALIB_SAMPLES
                 and not self._calib_params_locked):
             if self._evaluate_hold_flatness():
                 self._calib_params_locked = True
