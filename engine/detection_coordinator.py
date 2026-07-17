@@ -366,14 +366,24 @@ class DetectionCoordinator:
     # ─── Params ──────────────────────────────────────────────────────
 
     def _get_neutral_params(self) -> Optional[Dict[str, Any]]:
-        """Get or compute neutral hold params (midpoints of constraint ranges).
+        """Get or compute neutral hold params.
 
-        These are the most passive safe operating point — the greenhouse (or any
-        target) becomes a sensor, not an active controller. The optimizer's
-        best params fight coupling; neutral params let it through.
+        Priority:
+        1. Config-specified hold_params (detection.hold_params) — if present, use directly
+        2. Cached params from calibration search
+        3. Callback (compute_neutral_params_fn) — strain-aware midpoints
+        4. Fallback: flat midpoints from constraint ranges
         """
         if self._neutral_params is not None:
             return self._neutral_params
+
+        # Check config override first
+        det_cfg = self.config.get('detection', {})
+        hold_params = det_cfg.get('hold_params')
+        if hold_params:
+            self._neutral_params = hold_params
+            logger.info("Using config-specified hold params (skipping midpoint computation)")
+            return hold_params
 
         if self._compute_neutral_params_fn:
             params = self._compute_neutral_params_fn()
