@@ -977,6 +977,10 @@ class DetectionCoordinator:
         # Budget management: set on entry, decrement on subsequent trials
         if self._push_count == 0:
             # Entering PUSH — initialize the push budget
+            logger.info(
+                f"PUSH: entering push phase — "
+                f"scale={self._locked_scale:.3f}, budget={self.push_block_size} trials"
+            )
             self._set_lease_phase(self.PUSH, push_budget=self.push_block_size)
         else:
             # Continuing — previous PUSH trial completed, decrement budget
@@ -1017,6 +1021,9 @@ class DetectionCoordinator:
         # Budget management: set on entry, decrement on subsequent trials
         if self._pause_count == 0:
             # Entering PAUSE — initialize the pause budget
+            logger.info(
+                f"PAUSE: entering pause phase — budget={self.pause_block_size} trials"
+            )
             self._set_lease_phase(self.PAUSE, pause_budget=self.pause_block_size)
         else:
             # Continuing — previous PAUSE trial completed, decrement budget
@@ -1111,6 +1118,14 @@ class DetectionCoordinator:
                 logger.info("HOLD: signaled readiness for hold_calib")
         else:
             self._hold_calib_receiver_count = 0
+
+        # Log receiver state periodically — every 5 trials or on phase change
+        if self._hold_count % 5 == 1 or phase != getattr(self, '_last_observed_phase', None):
+            logger.info(
+                f"HOLD: receiver trial {self._hold_count}, "
+                f"sender phase={phase}"
+            )
+            self._last_observed_phase = phase
 
         # Receiver hold — tag with the lease phase we observed so we can trace
         # whether the receiver correctly saw push/pause/hold_calib from the sender.
