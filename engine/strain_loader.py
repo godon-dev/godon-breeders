@@ -32,6 +32,7 @@ STRAIN_MODULES = {
     "linux_performance": "f.breeder.strains.linux_performance.strain",
     "bench_greenhouse": "f.breeder.strains.bench_greenhouse.strain",
     "bench_microgrid": "f.breeder.strains.bench_microgrid.strain",
+    "bench_generic": "f.breeder.strains.bench_generic.strain",
 }
 
 REQUIRED_ATTRS = ("suggest_params", "validate_config")
