@@ -40,6 +40,14 @@ Receiver flow: OPTIMIZE → HOLD → OPTIMIZE
 
 The receiver has one behavior: hold neutral params while any sender holds the lease.
 The observer splits receiver hold trials by sender timestamps to detect coupling edges.
+
+Lease design (count-based budget):
+  The sender_lease table uses push_remaining / pause_remaining counters instead of a
+  time-based expiry. A sender's turn lasts exactly as long as it has budget remaining.
+  This avoids premature lease expiry when trials take longer than expected (DB retries,
+  slow effectuation). Crash recovery is handled via last_heartbeat staleness: if the
+  heartbeat is older than STALE_SENDER_MULTIPLIER × WORST_CASE_TRIAL_SECONDS, another
+  breeder may force-acquire the lease.
 """
 
 import json
@@ -56,7 +64,8 @@ class DetectionCoordinator:
     what mode the breeder should operate in for that trial.
 
     Coordination between breeders happens through:
-    1. sender_lease table — fencing token lease with phase communication
+    1. sender_lease table — fencing token lease with phase communication and
+       count-based budget (push_remaining / pause_remaining)
     2. detection_readiness table — barrier for coordinated calibration
     """
 
@@ -71,7 +80,8 @@ class DetectionCoordinator:
     HOLD = "hold"  # receiver
 
     # Safety limits
-    LEASE_DURATION_SECONDS = 90
+    WORST_CASE_TRIAL_SECONDS = 600  # estimated worst-case single-trial duration
+    STALE_SENDER_MULTIPLIER = 5     # stale = last_heartbeat older than N × worst case
     MIN_IMPULSE_SCALE = 0.125
     MAX_HOLD_TRIALS = 100
     MAX_CALIB_WAIT = 30  # extra trials beyond hold_calib_trials to wait for partner
@@ -140,8 +150,18 @@ class DetectionCoordinator:
 
     # ─── Database Setup ──────────────────────────────────────────────
 
+    def _stale_interval(self) -> str:
+        """Return the stale threshold as a plain seconds string for SQL INTERVAL."""
+        return str(self.STALE_SENDER_MULTIPLIER * self.WORST_CASE_TRIAL_SECONDS)
+
     def _ensure_tables(self):
-        """Create/migrate lease table and readiness table. Called once at init."""
+        """Create lease table and readiness table. Called once at init.
+
+        The sender_lease table uses a count-based budget (push_remaining,
+        pause_remaining) instead of a time-based expiry. The lease does NOT
+        expire by time — it lasts as long as the sender has budget remaining.
+        last_heartbeat is used solely for crash-recovery staleness detection.
+        """
         def op(conn):
             cur = conn.cursor()
             cur.execute("""
@@ -150,17 +170,16 @@ class DetectionCoordinator:
                     holder VARCHAR(255),
                     token INT DEFAULT 0,
                     phase VARCHAR(50),
-                    expires_at TIMESTAMPTZ,
+                    push_remaining INT DEFAULT 0,
+                    pause_remaining INT DEFAULT 0,
+                    last_heartbeat TIMESTAMPTZ,
                     CHECK (id = 1)
                 )
             """)
             cur.execute(
-                "INSERT INTO sender_lease (id, holder, token, phase, expires_at) "
-                "VALUES (1, NULL, 0, NULL, NULL) ON CONFLICT (id) DO NOTHING"
-            )
-            # Add phase column if upgrading from old schema
-            cur.execute(
-                "ALTER TABLE sender_lease ADD COLUMN IF NOT EXISTS phase VARCHAR(50)"
+                "INSERT INTO sender_lease "
+                "(id, holder, token, phase, push_remaining, pause_remaining, last_heartbeat) "
+                "VALUES (1, NULL, 0, NULL, 0, 0, NULL) ON CONFLICT (id) DO NOTHING"
             )
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS detection_readiness (
@@ -176,12 +195,22 @@ class DetectionCoordinator:
             logger.warning(f"Failed to ensure tables: {e}")
 
     def _cleanup_stale_state(self):
-        """Clear stale lease and readiness rows from previous runs."""
+        """Clear stale lease and readiness rows from previous runs.
+
+        A lease is stale if last_heartbeat is older than the stale threshold
+        (STALE_SENDER_MULTIPLIER × WORST_CASE_TRIAL_SECONDS). This handles
+        crash recovery for senders that died without releasing.
+        """
+        stale = self._stale_interval()
         def op(conn):
             cur = conn.cursor()
             cur.execute(
-                "UPDATE sender_lease SET holder = NULL, phase = NULL "
-                "WHERE id = 1 AND holder IS NOT NULL AND expires_at < NOW()"
+                "UPDATE sender_lease "
+                "SET holder = NULL, phase = NULL, "
+                "push_remaining = 0, pause_remaining = 0 "
+                "WHERE id = 1 AND holder IS NOT NULL "
+                "AND (last_heartbeat IS NULL "
+                "OR last_heartbeat < NOW() - INTERVAL '" + stale + " seconds')"
             )
             cur.execute(
                 "DELETE FROM detection_readiness "
@@ -199,16 +228,25 @@ class DetectionCoordinator:
         """Try to acquire the sender lease and set initial phase.
 
         Atomic conditional UPDATE — no race condition possible.
-        Lease is free if holder is NULL or lease expired.
+        Lease is free if holder is NULL or the current holder is stale
+        (last_heartbeat older than the stale threshold).
+
+        On acquisition, budget counters are zeroed; they are set later when
+        the sender enters PUSH / PAUSE.
         """
+        stale = self._stale_interval()
         def op(conn):
             cur = conn.cursor()
-            interval = str(self.LEASE_DURATION_SECONDS)
             cur.execute(
                 "UPDATE sender_lease "
                 "SET holder = %s, token = token + 1, phase = %s, "
-                "expires_at = NOW() + INTERVAL '" + interval + " seconds' "
-                "WHERE id = 1 AND (holder IS NULL OR expires_at < NOW())",
+                "push_remaining = 0, pause_remaining = 0, "
+                "last_heartbeat = NOW() "
+                "WHERE id = 1 AND ("
+                "holder IS NULL "
+                "OR last_heartbeat IS NULL "
+                "OR last_heartbeat < NOW() - INTERVAL '" + stale + " seconds'"
+                ")",
                 (self.breeder_id, phase)
             )
             updated = cur.rowcount
@@ -223,14 +261,29 @@ class DetectionCoordinator:
             logger.warning(f"Failed to acquire lease: {e}")
             return False
 
-    def _set_lease_phase(self, phase: str):
-        """Update the phase column on the lease."""
+    def _set_lease_phase(self, phase: str, push_budget: Optional[int] = None,
+                         pause_budget: Optional[int] = None):
+        """Update the phase column on the lease.
+
+        Optionally set the push or pause budget atomically in the same UPDATE.
+        This is used when entering PUSH (push_budget = push_block_size) or
+        PAUSE (pause_budget = pause_block_size).
+        """
         def op(conn):
             cur = conn.cursor()
+            sets: list = ["phase = %s"]
+            params: list = [phase]
+            if push_budget is not None:
+                sets.append("push_remaining = %s")
+                params.append(push_budget)
+            if pause_budget is not None:
+                sets.append("pause_remaining = %s")
+                params.append(pause_budget)
+            params.extend([self.breeder_id, self._lease_token])
             cur.execute(
-                "UPDATE sender_lease SET phase = %s "
+                "UPDATE sender_lease SET " + ", ".join(sets) + " "
                 "WHERE id = 1 AND holder = %s AND token = %s",
-                (phase, self.breeder_id, self._lease_token)
+                params
             )
             cur.close()
         try:
@@ -238,14 +291,17 @@ class DetectionCoordinator:
         except Exception as e:
             logger.warning(f"Failed to set lease phase: {e}")
 
-    def _heartbeat_lease(self) -> bool:
-        """Renew lease. Returns False if we lost it (another breeder took over)."""
+    def _heartbeat(self) -> bool:
+        """Update last_heartbeat for the current lease.
+
+        Returns False if we lost the lease (another breeder took over via
+        stale recovery, so our token no longer matches). This provides
+        fencing — a stolen lease is detected on the next heartbeat.
+        """
         def op(conn):
             cur = conn.cursor()
-            interval = str(self.LEASE_DURATION_SECONDS)
             cur.execute(
-                "UPDATE sender_lease "
-                "SET expires_at = NOW() + INTERVAL '" + interval + " seconds' "
+                "UPDATE sender_lease SET last_heartbeat = NOW() "
                 "WHERE id = 1 AND holder = %s AND token = %s",
                 (self.breeder_id, self._lease_token)
             )
@@ -253,17 +309,54 @@ class DetectionCoordinator:
             cur.close()
             return result
         try:
-            return self._db(op, "heartbeat_lease")
+            return self._db(op, "heartbeat")
         except Exception as e:
             logger.warning(f"Heartbeat failed: {e}")
             return False
 
+    def _decrement_budget(self, phase: str):
+        """Decrement the budget counter for the given phase by 1.
+
+        Called after each sender trial in PUSH or PAUSE completes.
+        Uses GREATEST(col - 1, 0) to prevent negative values.
+        Also updates the phase label in the same atomic UPDATE.
+        """
+        def op(conn):
+            cur = conn.cursor()
+            if phase == self.PUSH:
+                cur.execute(
+                    "UPDATE sender_lease "
+                    "SET phase = %s, "
+                    "push_remaining = GREATEST(push_remaining - 1, 0) "
+                    "WHERE id = 1 AND holder = %s AND token = %s",
+                    (phase, self.breeder_id, self._lease_token)
+                )
+            elif phase == self.PAUSE:
+                cur.execute(
+                    "UPDATE sender_lease "
+                    "SET phase = %s, "
+                    "pause_remaining = GREATEST(pause_remaining - 1, 0) "
+                    "WHERE id = 1 AND holder = %s AND token = %s",
+                    (phase, self.breeder_id, self._lease_token)
+                )
+            cur.close()
+        try:
+            self._db(op, "decrement_budget")
+        except Exception as e:
+            logger.warning(f"Failed to decrement budget: {e}")
+
     def _release_lease(self):
-        """Release the lease so partner can become sender."""
+        """Release the lease so partner can become sender.
+
+        Zeros the budget counters so _has_active_sender() immediately
+        returns False for this holder.
+        """
         def op(conn):
             cur = conn.cursor()
             cur.execute(
-                "UPDATE sender_lease SET holder = NULL, phase = NULL "
+                "UPDATE sender_lease "
+                "SET holder = NULL, phase = NULL, "
+                "push_remaining = 0, pause_remaining = 0 "
                 "WHERE id = 1 AND holder = %s AND token = %s",
                 (self.breeder_id, self._lease_token)
             )
@@ -275,12 +368,25 @@ class DetectionCoordinator:
             logger.warning(f"Failed to release lease: {e}")
 
     def _has_active_sender(self) -> bool:
-        """Check if any breeder holds a valid (non-expired) lease."""
+        """Check if any breeder holds a valid (active) lease.
+
+        A sender is active if holder IS NOT NULL AND:
+        - push_remaining > 0 OR pause_remaining > 0  (budget-based: PUSH/PAUSE)
+        - OR last_heartbeat is fresh (not stale)      (calibration phases)
+
+        The budget check prevents premature HOLD exit during long PUSH/PAUSE
+        blocks. The heartbeat check covers HOLD_CALIB / IMPULSE_CALIB phases
+        where no budget has been set yet, and also serves as a staleness guard
+        so a crashed sender's stale lease is not considered active.
+        """
+        stale = self._stale_interval()
         def op(conn):
             cur = conn.cursor()
             cur.execute(
                 "SELECT count(*) FROM sender_lease "
-                "WHERE id = 1 AND holder IS NOT NULL AND expires_at > NOW()"
+                "WHERE id = 1 AND holder IS NOT NULL "
+                "AND (push_remaining > 0 OR pause_remaining > 0 "
+                "OR last_heartbeat > NOW() - INTERVAL '" + stale + " seconds')"
             )
             result = cur.fetchone()[0] > 0
             cur.close()
@@ -291,12 +397,19 @@ class DetectionCoordinator:
             return False
 
     def _get_lease_phase(self) -> Optional[str]:
-        """Read the current phase from the active lease."""
+        """Read the current phase from the active lease.
+
+        Uses the same active-sender conditions as _has_active_sender().
+        Returns None if no sender is active.
+        """
+        stale = self._stale_interval()
         def op(conn):
             cur = conn.cursor()
             cur.execute(
                 "SELECT phase FROM sender_lease "
-                "WHERE id = 1 AND holder IS NOT NULL AND expires_at > NOW()"
+                "WHERE id = 1 AND holder IS NOT NULL "
+                "AND (push_remaining > 0 OR pause_remaining > 0 "
+                "OR last_heartbeat > NOW() - INTERVAL '" + stale + " seconds')"
             )
             row = cur.fetchone()
             cur.close()
@@ -305,6 +418,29 @@ class DetectionCoordinator:
             return self._db(op, "get_lease_phase")
         except Exception:
             return None
+
+    def _is_stale(self) -> bool:
+        """Check if the current lease holder's heartbeat is stale.
+
+        Used for diagnostics / logging. The actual stale-recovery logic
+        lives in _try_acquire_lease and _cleanup_stale_state.
+        """
+        stale = self._stale_interval()
+        def op(conn):
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT count(*) FROM sender_lease "
+                "WHERE id = 1 AND holder IS NOT NULL "
+                "AND (last_heartbeat IS NULL "
+                "OR last_heartbeat < NOW() - INTERVAL '" + stale + " seconds')"
+            )
+            result = cur.fetchone()[0] > 0
+            cur.close()
+            return result
+        try:
+            return self._db(op, "is_stale")
+        except Exception:
+            return False
 
     # ─── Readiness Barrier ───────────────────────────────────────────
 
@@ -345,6 +481,10 @@ class DetectionCoordinator:
         A breeder is 'active' if seen in interference_active_breeders within 6 min.
         A readiness signal is valid for 3 minutes.
         Requires at least 2 active breeders.
+
+        NOTE: This barrier is ONLY used when hold_params are NOT from config
+        (i.e. during flatness-search calibration). When hold_params come from
+        config, the readiness barrier is skipped entirely.
         """
         def op(conn):
             cur = conn.cursor()
@@ -500,9 +640,12 @@ class DetectionCoordinator:
             self._initialized = True
 
         # ── Heartbeat for sender states ──────────────────────────────
+        # Updates last_heartbeat (for crash recovery) and verifies we still
+        # hold the lease via the fencing token. If another breeder stole the
+        # lease (via stale recovery), our token won't match and we bail out.
         if self.state in (self.HOLD_CALIB, self.IMPULSE_CALIB,
                           self.PUSH, self.PAUSE):
-            if not self._heartbeat_lease():
+            if not self._heartbeat():
                 logger.warning("Lost sender lease — returning to OPTIMIZE")
                 self.state = self.OPTIMIZE
                 self._clear_ready()
@@ -658,10 +801,12 @@ class DetectionCoordinator:
         """Sender: hold neutral params, wait for partner readiness.
 
         When hold_params come from config (user-specified), skip the
-        flatness search entirely — params are known, just lock and proceed.
+        flatness search AND the readiness barrier entirely — just lock
+        the params and proceed directly to IMPULSE_CALIB.
 
         When hold_params are computed (midpoints/callback), run the
-        flatness search to find stable params before proceeding.
+        flatness search to find stable params, then wait for the readiness
+        barrier (both agents must be quiet simultaneously).
         """
         params = self._get_neutral_params()
         if not params:
@@ -669,15 +814,30 @@ class DetectionCoordinator:
             self.state = self.DONE
             return self._handle_done(trial)
 
-        self._set_lease_phase(self.HOLD_CALIB)
         self._hold_calib_count += 1
 
-        # If params came from config, skip calibration search — trust the user
+        # ── Config params: skip flatness search AND readiness barrier ──
+        # The barrier is only needed for the flatness-search case where both
+        # agents must be quiet simultaneously. With config params, the sender
+        # just needs its own params locked, then proceeds directly.
         if self._hold_params_from_config:
             if not self._calib_params_locked:
                 self._calib_params_locked = True
-                logger.info("HOLD_CALIB: params from config — skipping flatness search")
-        elif (self._hold_calib_count >= self.MIN_CALIB_SAMPLES
+                logger.info(
+                    "HOLD_CALIB: params from config — "
+                    "skipping flatness search and readiness barrier"
+                )
+            self._clear_ready()
+            self.state = self.IMPULSE_CALIB
+            self._calib_scale = 1.0
+            self._calib_sent = False
+            self._last_calib_failed = False
+            return self._handle_impulse_calib(trial)
+
+        # ── Computed params: flatness search + readiness barrier ──────
+        self._set_lease_phase(self.HOLD_CALIB)
+
+        if (self._hold_calib_count >= self.MIN_CALIB_SAMPLES
                 and not self._calib_params_locked):
             if self._evaluate_hold_flatness():
                 self._calib_params_locked = True
@@ -805,12 +965,22 @@ class DetectionCoordinator:
     def _handle_push(self, trial) -> Dict[str, Any]:
         """Sender: probe at locked scale for push_block_size trials.
 
+        On entry (first trial), sets push_remaining = push_block_size in the
+        lease so the receiver knows the sender is budgeted for N push trials.
+        Each subsequent trial decrements the budget.
+
         Guardrail FAILs during push are logged but do NOT change the scale.
         The effectuation happened — the coupling already propagated.
         AIMD moves to between rounds: adjust next round's starting scale
         based on this round's FAIL rate.
         """
-        self._set_lease_phase(self.PUSH)
+        # Budget management: set on entry, decrement on subsequent trials
+        if self._push_count == 0:
+            # Entering PUSH — initialize the push budget
+            self._set_lease_phase(self.PUSH, push_budget=self.push_block_size)
+        else:
+            # Continuing — previous PUSH trial completed, decrement budget
+            self._decrement_budget(self.PUSH)
 
         params = self._get_impulse_params(self._locked_scale)
         if not params:
@@ -837,11 +1007,20 @@ class DetectionCoordinator:
     def _handle_pause(self, trial) -> Dict[str, Any]:
         """Sender: hold neutral params for pause_block_size trials.
 
+        On entry (first trial), sets pause_remaining = pause_block_size in the
+        lease. Each subsequent trial decrements the budget.
+
         This is the ABA recovery — the sender returns to the same neutral params
         the receiver is holding at. The coupling signal should recover.
         The observer uses push vs pause to compute the falling edge.
         """
-        self._set_lease_phase(self.PAUSE)
+        # Budget management: set on entry, decrement on subsequent trials
+        if self._pause_count == 0:
+            # Entering PAUSE — initialize the pause budget
+            self._set_lease_phase(self.PAUSE, pause_budget=self.pause_block_size)
+        else:
+            # Continuing — previous PAUSE trial completed, decrement budget
+            self._decrement_budget(self.PAUSE)
 
         params = self._get_neutral_params()
         if not params:
@@ -890,8 +1069,9 @@ class DetectionCoordinator:
         """Receiver: hold neutral params while sender is active.
 
         The receiver's entire world is this state. It enters when someone else
-        holds the lease and exits when the lease is released or expires.
-        If the sender is in HOLD_CALIB, participate in the readiness barrier.
+        holds the lease and exits when the lease is released or becomes stale.
+        If the sender is in HOLD_CALIB (non-config path), participate in the
+        readiness barrier.
         """
         if not self._has_active_sender():
             logger.info("HOLD: sender finished — back to OPTIMIZE")
@@ -920,6 +1100,7 @@ class DetectionCoordinator:
                     'detection_trial': False}
 
         # Participate in readiness barrier if sender is in hold_calib
+        # (only happens for the non-config flatness-search path)
         phase = self._get_lease_phase()
         if phase == self.HOLD_CALIB:
             self._hold_calib_receiver_count += 1
