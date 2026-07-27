@@ -87,7 +87,8 @@ class TestHoldParamsSkipCalib:
     """When hold_params come from config, skip flatness search entirely."""
 
     def test_locks_on_first_trial(self):
-        """Params from config must be locked immediately — no MIN_CALIB_SAMPLES wait."""
+        """Params from config must be locked immediately — no MIN_CALIB_SAMPLES wait.
+        With config params, HOLD_CALIB skips barrier and proceeds directly to IMPULSE_CALIB."""
         coord = _make_coord(hold_params={'heating': 20.0, 'light': 300.0})
         coord.state = coord.HOLD_CALIB
         coord._hold_calib_count = 0
@@ -101,8 +102,8 @@ class TestHoldParamsSkipCalib:
 
             assert coord._calib_params_locked is True, \
                 "Params from config should be locked on first trial"
-            assert result['mode'] == 'hold'
-            assert result['params'] == {'heating': 20.0, 'light': 300.0}
+            assert coord.state == coord.IMPULSE_CALIB, \
+                "Config params should proceed directly to IMPULSE_CALIB"
             eval_mock.assert_not_called(), \
                 "Flatness evaluation should NOT run for config-specified params"
 
@@ -145,7 +146,8 @@ class TestHoldParamsSkipCalib:
             adjust_mock.assert_not_called()
 
     def test_signals_ready_immediately(self):
-        """Readiness should be signaled on first trial, not after flatness pass."""
+        """With config params, readiness barrier is skipped entirely.
+        _signal_ready is NOT called — config params proceed directly to IMPULSE_CALIB."""
         coord = _make_coord(hold_params={'heating': 20.0})
         coord.state = coord.HOLD_CALIB
         coord._hold_calib_count = 0
@@ -156,7 +158,9 @@ class TestHoldParamsSkipCalib:
                 trial = MockTrial(0)
                 coord._handle_hold_calib(trial)
 
-                signal_mock.assert_called_once_with(coord.HOLD_CALIB)
+                signal_mock.assert_not_called(), \
+                    "_signal_ready should NOT be called when hold_params from config"
+                assert coord.state == coord.IMPULSE_CALIB
 
     def test_proceeds_to_impulse_when_partner_ready(self):
         """When config hold_params + partner ready, go straight to impulse."""
