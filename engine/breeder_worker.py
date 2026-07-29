@@ -860,15 +860,15 @@ class BreederWorker:
 
     def _check_shutdown_requested(self) -> bool:
         try:
+            from sqlalchemy import text
             query = "SELECT shutdown_requested FROM breeder_state LIMIT 1;"
-            result = self.study.storage._engine.execute(query)
+            with self.study._storage.engine.connect() as conn:
+                result = conn.execute(text(query))
 
-            if result and result.rowcount > 0:
-                row = result.fetchone()
-                shutdown_requested = row[0] if row else False
-                if shutdown_requested:
-                    logger.info(f"Shutdown flag is set for breeder {self.breeder_uuid}")
-                    return True
+            row = result.fetchone()
+            if row and row[0]:
+                logger.info(f"Shutdown flag is set for breeder {self.breeder_uuid}")
+                return True
 
             return False
 
