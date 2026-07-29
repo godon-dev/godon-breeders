@@ -93,6 +93,7 @@ def _create_worker(**config_overrides):
          patch.object(BreederWorker, '_update_state'), \
          patch('engine.breeder_worker.load_strain', return_value=MagicMock()):
         worker = BreederWorker(config)
+    worker._check_shutdown_requested = lambda: False
     return worker
 
 

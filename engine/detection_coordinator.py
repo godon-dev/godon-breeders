@@ -54,7 +54,9 @@ import json
 import logging
 from typing import Dict, Any, Optional, Callable
 
-logger = logging.getLogger(__name__)
+from f.breeder.shared.otel_logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class DetectionCoordinator:

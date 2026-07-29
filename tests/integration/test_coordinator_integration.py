@@ -15,18 +15,19 @@
 # GNU Affero General Public License for more details.
 #
 # You should have received a copy of the GNU Affero General Public License
-# along with this godon. If not, see <http://www.gnu.org/licenses/>.
+# along with this godon.  If not, see <http://www.gnu.org/licenses/>.
 #
 #!/usr/bin/env python3
 """
-Integration test for DetectionCoordinator state machine.
+Integration tests for DetectionCoordinator state machine (count-based budget).
 
-Simulates full trial sequences with configurable FAIL rates and verifies:
-1. Push block always completes (including with 100% FAIL)
-2. Turn-taking actually alternates
-3. No state gets stuck
-4. Receiver enters baseline BEFORE signal
-5. FAIL on push doesn't reset the push counter
+Tests the state machine behavior end-to-end through decide_trial(),
+verifying:
+1. Push block always completes (fixed count, even with guardrail FAILs)
+2. on_guardrail_fail does NOT reset push counter or scale
+3. Every state has a bounded escape hatch
+4. Full sender round: PUSH -> PAUSE -> DONE -> COOLDOWN -> OPTIMIZE
+5. OPTIMIZE stays put when not enough trials or breeders
 """
 
 import sys
@@ -37,19 +38,21 @@ from unittest.mock import MagicMock, patch
 from engine.detection_coordinator import DetectionCoordinator
 
 
-def _base_config():
-    return {
-        'detection': {
-            'warmup_trials': 5,
+def _base_config(**overrides):
+    config = {
+        'interference_detection': {
+            'min_optimize_trials': 5,
+            'hold_calib_trials': 3,
             'push_block_size': 3,
             'pause_block_size': 3,
-            'receiver_baseline_trials': 2,
-            'receiver_post_trials': 2,
-            'recover_trials': 2,
+            'cooldown_trials': 2,
+            'hold_params': {'heating': 20.0, 'light': 500.0, 'co2': 10.0},
         },
         'objectives': [{'name': 'growth_rate', 'direction': 'maximize'}],
         'settings': {},
     }
+    config.update(overrides)
+    return config
 
 
 def _create_coordinator(breeder_id='test-1', config=None):
@@ -57,85 +60,51 @@ def _create_coordinator(breeder_id='test-1', config=None):
     coord = DetectionCoordinator(
         breeder_id=breeder_id,
         config=config,
-        shared_db_fn=lambda fn, desc: _mock_db(fn, desc),
+        shared_db_fn=lambda fn, desc: _noop_db(fn, desc),
         collect_upper_bounds_fn=lambda cfg: [
-            {'name': 'heating', 'upper': 40.0, 'range': 35.0, 'is_int': False},
-            {'name': 'light', 'upper': 1000.0, 'range': 1000.0, 'is_int': False},
-            {'name': 'co2', 'upper': 20.0, 'range': 20.0, 'is_int': False},
+            {'name': 'heating', 'upper': 40.0, 'lower': 0.0, 'range': 40.0, 'is_int': False},
+            {'name': 'light', 'upper': 1000.0, 'lower': 0.0, 'range': 1000.0, 'is_int': False},
+            {'name': 'co2', 'upper': 20.0, 'lower': 0.0, 'range': 20.0, 'is_int': False},
         ],
     )
     return coord
 
 
-# Global mock DB state
-_mock_rounds = []
-_mock_lock_holder = [None]
-_mock_complete_count = [0]
-_mock_effectuation_params = [None]
-
-
-def _mock_db(fn, desc):
-    """Mock _with_shared_db — provides a mock connection."""
+def _noop_db(fn, desc):
+    """Minimal DB mock — most DB methods are patched per-test."""
     conn = MagicMock()
     cur = MagicMock()
-
-    def execute(query, *args):
-        query_str = str(query).lower()
-        if 'pg_try_advisory_lock' in query_str:
-            if _mock_lock_holder[0] is None:
-                _mock_lock_holder[0] = 'test-1'
-                cur.fetchone.return_value = (True,)
-            else:
-                cur.fetchone.return_value = (False,)
-        elif 'pg_advisory_unlock' in query_str:
-            _mock_lock_holder[0] = None
-            cur.fetchone.return_value = (True,)
-        elif 'insert into detection_rounds' in query_str:
-            _mock_rounds.append({'sender_id': args[0] if args else 'test-1', 'status': 'active'})
-        elif 'select sender_id from detection_rounds order by round_id' in query_str:
-            if _mock_rounds:
-                cur.fetchone.return_value = (_mock_rounds[-1]['sender_id'],)
-            else:
-                cur.fetchone.return_value = None
-        elif 'select count(*) from detection_rounds' in query_str:
-            cur.fetchone.return_value = (0,)  # other breeder has sent
-        elif 'update detection_rounds set status' in query_str:
-            for r in _mock_rounds:
-                if r['status'] == 'active' and r['sender_id'] == 'test-1':
-                    r['status'] = 'completed'
-        elif 'select count(*) from detection_rounds where status' in query_str:
-            cur.fetchone.return_value = (len([r for r in _mock_rounds if r['status'] == 'active']),)
-
+    cur.fetchone.return_value = (0,)
+    cur.rowcount = 0
     conn.cursor.return_value = cur
-    cur.execute.side_effect = execute
-    cur.close = MagicMock()
-    result = fn(conn)
-    return result
+    try:
+        return fn(conn)
+    except Exception:
+        return None
 
 
-def _reset_mocks():
-    global _mock_rounds, _mock_lock_holder, _mock_complete_count, _mock_effectuation_params
-    _mock_rounds = []
-    _mock_lock_holder = [None]
-    _mock_complete_count = [0]
-    _mock_effectuation_params = [None]
+def _patch_sender_db(coord):
+    """Patch all DB-dependent methods so the sender state machine runs cleanly.
 
-
-class MockStudy:
-    def __init__(self):
-        self.trials = []
-
-    def add_complete_trial(self, number, params=None, value=0.5):
-        t = MagicMock()
-        t.state = 'COMPLETE'
-        t.number = number
-        t.user_attrs = {'effectuation_params': '{"heating": 20.0}'} if params else None
-        t.values = [value]
-        self.trials.append(t)
-
-    @property
-    def COMPLETE(self):
-        return [t for t in self.trials if t.state == 'COMPLETE']
+    Returns a list of patchers to stop later.
+    """
+    patchers = [
+        patch.object(coord, '_ensure_tables'),
+        patch.object(coord, '_cleanup_stale_state'),
+        patch.object(coord, '_heartbeat', return_value=True),
+        patch.object(coord, '_set_lease_phase'),
+        patch.object(coord, '_decrement_budget'),
+        patch.object(coord, '_release_lease'),
+        patch.object(coord, '_signal_ready'),
+        patch.object(coord, '_clear_ready'),
+        patch.object(coord, '_check_all_ready', return_value=True),
+        patch.object(coord, '_count_active_breeders', return_value=2),
+        patch.object(coord, '_count_complete_trials_db', return_value=100),
+        patch.object(coord, '_has_active_sender', return_value=False),
+    ]
+    for p in patchers:
+        p.start()
+    return patchers
 
 
 class MockTrial:
@@ -151,132 +120,180 @@ class MockTrial:
         return self._attrs
 
 
-def test_push_completes_with_all_fails():
+class TestPushCompletes:
     """Push block must complete even when every trial FAILs guardrails."""
-    _reset_mocks()
-    coord = _create_coordinator()
-    coord.warmup_target = 0  # Skip warmup
-    coord.state = coord.WARMUP
 
-    # Mock warmup as complete
-    with patch.object(coord, '_count_complete_trials_db', return_value=10):
-        with patch.object(coord, '_refresh_baseline_db'):
-            coord._baseline_params = {'heating': 20.0}
+    def test_push_completes_with_all_fails(self):
+        coord = _create_coordinator()
+        coord._initialized = True
+        coord.state = DetectionCoordinator.PUSH
+        coord._push_count = 0
+        coord._locked_scale = 1.0
 
-            # Force into SENDER_PUSH
-            coord.state = coord.SENDER_PUSH
-            coord._push_count = 0
-            coord._pause_count = 0
-
-            # Simulate push_block_size pushes, all FAILing
-            push_count = 0
+        patchers = _patch_sender_db(coord)
+        try:
             for i in range(coord.push_block_size + 5):
                 trial = MockTrial(i + 1)
-                decision = coord.decide_trial(trial, MockStudy())
+                decision = coord.decide_trial(trial)
 
-                if coord.state == coord.SENDER_PUSH:
-                    assert decision['mode'] == 'impulse', f"Trial {i}: expected impulse, got {decision['mode']}"
-                    assert decision['impulse_phase'] == 'push', f"Trial {i}: expected push, got {decision.get('impulse_phase')}"
+                if coord.state == DetectionCoordinator.PUSH:
+                    assert decision['mode'] == 'impulse', \
+                        f"Trial {i}: expected impulse, got {decision['mode']}"
+                    assert decision['impulse_phase'] == 'push', \
+                        f"Trial {i}: expected push, got {decision.get('impulse_phase')}"
                     # Simulate FAIL
                     coord.on_guardrail_fail({'heating': 40.0})
-                    push_count += 1
                 else:
-                    # Transitioned out of push — success
                     break
 
-            assert coord.state != coord.SENDER_PUSH, \
-                f"STUCK in SENDER_PUSH after {push_count} attempts (counter={coord._push_count})"
+            assert coord.state != DetectionCoordinator.PUSH, \
+                f"STUCK in PUSH after {coord.push_block_size + 5} trials"
 
-            print(f"PASS: Push completed after {push_count} pushes (push_block_size={coord.push_block_size})")
-
-
-def test_push_not_reset_on_fail():
-    """on_guardrail_fail must NOT decrement push counter."""
-    _reset_mocks()
-    coord = _create_coordinator()
-
-    coord.state = coord.SENDER_PUSH
-    coord._push_count = 3
-    coord._baseline_params = {'heating': 20.0}
-
-    coord.on_guardrail_fail({'heating': 40.0})
-
-    assert coord._push_count == 3, f"Push counter was decremented on FAIL: {coord._push_count}"
-    assert coord._impulse_scale < 1.0, f"AIMD should have reduced scale: {coord._impulse_scale}"
-
-    print(f"PASS: Push counter not reset on FAIL (stayed at {coord._push_count}, scale={coord._impulse_scale:.2f})")
+            print(f"PASS: Push completed after {coord._push_count} pushes "
+                  f"(push_block_size={coord.push_block_size})")
+        finally:
+            for p in patchers:
+                p.stop()
 
 
-def test_no_state_runs_forever():
-    """Every state must have a max-trials escape hatch."""
-    coord = _create_coordinator()
+class TestGuardrailFail:
+    """on_guardrail_fail must NOT decrement push counter or change locked scale."""
 
-    max_limits = {
-        coord.SENDER_PUSH: coord.MAX_PUSH_ATTEMPTS,
-        coord.RECEIVER_HOLD: coord.MAX_HOLD_TRIALS,
-        coord.RECEIVER_BASELINE: coord.MAX_RECEIVER_BASELINE,
-        coord.RECEIVER_POST: coord.MAX_RECEIVER_POST,
-        coord.RECOVER: coord.MAX_RECOVER_TRIALS,
-    }
+    def test_push_not_reset_on_fail(self):
+        coord = _create_coordinator()
+        coord.state = DetectionCoordinator.PUSH
+        coord._push_count = 3
+        coord._locked_scale = 1.0
 
-    for state, max_trials in max_limits.items():
-        assert max_trials > 0, f"{state} has no max limit!"
-        assert max_trials < 200, f"{state} max limit too high: {max_trials}"
+        coord.on_guardrail_fail({'heating': 40.0})
 
-    print(f"PASS: All states have escape hatches: {max_limits}")
+        assert coord._push_count == 3, \
+            f"Push counter was decremented on FAIL: {coord._push_count}"
+        assert coord._locked_scale == 1.0, \
+            f"Locked scale should not change during PUSH: {coord._locked_scale}"
 
-
-def test_max_push_attempts_completes_round():
-    """If push always fails, MAX_PUSH_ATTEMPTS forces round completion."""
-    _reset_mocks()
-    coord = _create_coordinator()
-    coord.state = coord.SENDER_PUSH
-    coord._push_count = 0
-    coord._baseline_params = {'heating': 20.0}
-
-    with patch.object(coord, '_get_impulse_params', return_value={'heating': 40.0}):
-        decisions = []
-        for i in range(coord.MAX_PUSH_ATTEMPTS + 5):
-            trial = MockTrial(i)
-            decision = coord.decide_trial(trial, MockStudy())
-            decisions.append(decision)
-            if coord.state != coord.SENDER_PUSH:
-                break
-
-        assert coord.state != coord.SENDER_PUSH, \
-            f"STUCK in SENDER_PUSH after {coord.MAX_PUSH_ATTEMPTS + 5} trials"
-
-        # Should have transitioned to SENDER_DONE or SENDER_PAUSE
-        assert coord.state in (coord.SENDER_DONE, coord.SENDER_PAUSE), \
-            f"Unexpected state after max push: {coord.state}"
-
-        print(f"PASS: Escaped SENDER_PUSH after {len(decisions)} trials -> {coord.state}")
+        print(f"PASS: Push counter not reset on FAIL "
+              f"(stayed at {coord._push_count}, scale={coord._locked_scale:.2f})")
 
 
-def test_warmup_not_interrupted_by_stale_rounds():
-    """Warmup must complete fully, ignoring stale active rounds."""
-    _reset_mocks()
-    coord = _create_coordinator()
-    coord.state = coord.WARMUP
+class TestEscapeHatches:
+    """Every state must have a bounded escape hatch (max trials or floor)."""
 
-    # Mock: stale active round exists but warmup not done
-    with patch.object(coord, '_any_active_round', return_value=True):
-        with patch.object(coord, '_count_complete_trials_db', return_value=2):
+    def test_all_states_have_escape_hatch(self):
+        coord = _create_coordinator()
+
+        # Fixed-count phases: always complete in exactly N trials
+        assert coord.push_block_size > 0, "push_block_size must be positive"
+        assert coord.push_block_size < 200, \
+            f"push_block_size too high: {coord.push_block_size}"
+        assert coord.pause_block_size > 0, "pause_block_size must be positive"
+        assert coord.pause_block_size < 200, \
+            f"pause_block_size too high: {coord.pause_block_size}"
+        assert coord.cooldown_trials > 0, "cooldown_trials must be positive"
+
+        # Bounded search phases
+        assert coord.MAX_HOLD_TRIALS > 0, "MAX_HOLD_TRIALS missing"
+        assert coord.MAX_HOLD_TRIALS < 200, \
+            f"MAX_HOLD_TRIALS too high: {coord.MAX_HOLD_TRIALS}"
+        assert coord.MAX_HOLD_CALIB_SEARCH > 0, "MAX_HOLD_CALIB_SEARCH missing"
+
+        # Scale floor: IMPULSE_CALIB aborts when scale drops below this
+        assert coord.MIN_IMPULSE_SCALE > 0, "MIN_IMPULSE_SCALE missing"
+
+        # Partner wait timeout
+        assert coord.MAX_CALIB_WAIT > 0, "MAX_CALIB_WAIT missing"
+
+        print("PASS: All states have escape hatches")
+
+
+class TestFullSenderRound:
+    """Full sender round: PUSH -> PAUSE -> DONE -> COOLDOWN -> OPTIMIZE."""
+
+    def test_full_round_completes(self):
+        coord = _create_coordinator()
+        coord._initialized = True
+        coord.state = DetectionCoordinator.PUSH
+        coord._push_count = 0
+        coord._locked_scale = 1.0
+
+        patchers = _patch_sender_db(coord)
+        try:
+            states_seen = []
+            total_trials = 0
+
+            for i in range(coord.push_block_size + coord.pause_block_size + 10):
+                trial = MockTrial(i + 1)
+                coord.decide_trial(trial)
+                total_trials += 1
+
+                if coord.state not in states_seen:
+                    states_seen.append(coord.state)
+
+                if coord.state == DetectionCoordinator.OPTIMIZE:
+                    break
+
+            assert DetectionCoordinator.PAUSE in states_seen, \
+                f"Never entered PAUSE. States seen: {states_seen}"
+            assert DetectionCoordinator.COOLDOWN in states_seen, \
+                f"Never entered COOLDOWN. States seen: {states_seen}"
+            assert coord.state == DetectionCoordinator.OPTIMIZE, \
+                f"Did not return to OPTIMIZE. Final state: {coord.state}"
+
+            print(f"PASS: Full round completed in {total_trials} trials. "
+                  f"States: {' -> '.join(states_seen)}")
+        finally:
+            for p in patchers:
+                p.stop()
+
+
+class TestOptimizeGating:
+    """OPTIMIZE must stay in OPTIMIZE when conditions aren't met."""
+
+    def test_stays_optimize_when_not_enough_trials(self):
+        coord = _create_coordinator()
+        coord._initialized = True
+        coord.state = DetectionCoordinator.OPTIMIZE
+
+        with patch.object(coord, '_count_complete_trials_db', return_value=2), \
+             patch.object(coord, '_count_active_breeders', return_value=5), \
+             patch.object(coord, '_try_acquire_lease') as mock_acquire, \
+             patch.object(coord, '_has_active_sender') as mock_has_sender:
             trial = MockTrial(0)
-            decision = coord.decide_trial(trial, MockStudy())
+            decision = coord.decide_trial(trial)
 
-            assert coord.state == coord.WARMUP, \
-                f"Warmup interrupted by stale round! State={coord.state}"
+            assert coord.state == DetectionCoordinator.OPTIMIZE, \
+                f"Left OPTIMIZE with too few trials. State: {coord.state}"
             assert decision['mode'] == 'optimize', \
-                f"Warmup should optimize, got {decision['mode']}"
+                f"Expected optimize mode, got {decision['mode']}"
+            mock_acquire.assert_not_called()
 
-    print("PASS: Warmup not interrupted by stale rounds")
+        print("PASS: Stays in OPTIMIZE when not enough trials")
+
+    def test_stays_optimize_when_alone(self):
+        coord = _create_coordinator()
+        coord._initialized = True
+        coord.state = DetectionCoordinator.OPTIMIZE
+
+        with patch.object(coord, '_count_complete_trials_db', return_value=100), \
+             patch.object(coord, '_count_active_breeders', return_value=1), \
+             patch.object(coord, '_try_acquire_lease') as mock_acquire, \
+             patch.object(coord, '_has_active_sender') as mock_has_sender:
+            trial = MockTrial(0)
+            decision = coord.decide_trial(trial)
+
+            assert coord.state == DetectionCoordinator.OPTIMIZE, \
+                f"Left OPTIMIZE when alone. State: {coord.state}"
+            assert decision['mode'] == 'optimize'
+            mock_acquire.assert_not_called()
+
+        print("PASS: Stays in OPTIMIZE when only 1 breeder active")
 
 
 if __name__ == '__main__':
-    test_push_not_reset_on_fail()
-    test_push_completes_with_all_fails()
-    test_no_state_runs_forever()
-    test_max_push_attempts_completes_round()
-    test_warmup_not_interrupted_by_stale_rounds()
+    TestGuardrailFail().test_push_not_reset_on_fail()
+    TestPushCompletes().test_push_completes_with_all_fails()
+    TestEscapeHatches().test_all_states_have_escape_hatch()
+    TestFullSenderRound().test_full_round_completes()
+    TestOptimizeGating().test_stays_optimize_when_not_enough_trials()
+    TestOptimizeGating().test_stays_optimize_when_alone()
     print("\n=== ALL TESTS PASSED ===")
