@@ -53,21 +53,28 @@ def init_telemetry(service_name: str = None):
     if service_name:
         _service_name = service_name
     
-    resource = Resource.create({"service.name": _service_name})
+    try:
+        resource = Resource.create({"service.name": _service_name})
+        
+        tracer_provider = TracerProvider(resource=resource)
+        tracer_provider.add_span_processor(
+            BatchSpanProcessor(OTLPSpanExporter(endpoint=f"{OTEL_ENDPOINT}/v1/traces"))
+        )
+        try:
+            trace.set_tracer_provider(tracer_provider)
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"OTLP tracer provider already set: {e}")
+        _tracer = trace.get_tracer(_service_name)
+        
+        _logger_provider = LoggerProvider(resource=resource)
+        _logger_provider.add_log_record_processor(
+            BatchLogRecordProcessor(OTLPLogExporter(endpoint=f"{OTEL_ENDPOINT}/v1/logs"))
+        )
+        
+        _initialized = True
+    except Exception as e:
+        logging.getLogger(__name__).error(f"OTLP telemetry init failed: {e}", exc_info=True)
     
-    tracer_provider = TracerProvider(resource=resource)
-    tracer_provider.add_span_processor(
-        BatchSpanProcessor(OTLPSpanExporter(endpoint=f"{OTEL_ENDPOINT}/v1/traces"))
-    )
-    trace.set_tracer_provider(tracer_provider)
-    _tracer = trace.get_tracer(_service_name)
-    
-    _logger_provider = LoggerProvider(resource=resource)
-    _logger_provider.add_log_record_processor(
-        BatchLogRecordProcessor(OTLPLogExporter(endpoint=f"{OTEL_ENDPOINT}/v1/logs"))
-    )
-    
-    _initialized = True
     return _tracer, _logger_provider
 
 
