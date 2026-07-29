@@ -72,7 +72,9 @@ def init_telemetry(service_name: str = None):
         )
         
         _initialized = True
+        print(f"[otel_logging] OTLP telemetry initialized: endpoint={OTEL_ENDPOINT}, provider={_logger_provider is not None}", flush=True)
     except Exception as e:
+        print(f"[otel_logging] OTLP telemetry init FAILED: {e}", flush=True)
         logging.getLogger(__name__).error(f"OTLP telemetry init failed: {e}", exc_info=True)
     
     return _tracer, _logger_provider
