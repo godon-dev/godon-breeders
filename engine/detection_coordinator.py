@@ -372,14 +372,9 @@ class DetectionCoordinator:
     def _has_active_sender(self) -> bool:
         """Check if any breeder holds a valid (active) lease.
 
-        A sender is active if holder IS NOT NULL AND:
-        - push_remaining > 0 OR pause_remaining > 0  (budget-based: PUSH/PAUSE)
-        - OR last_heartbeat is fresh (not stale)      (calibration phases)
-
-        The budget check prevents premature HOLD exit during long PUSH/PAUSE
-        blocks. The heartbeat check covers HOLD_CALIB / IMPULSE_CALIB phases
-        where no budget has been set yet, and also serves as a staleness guard
-        so a crashed sender's stale lease is not considered active.
+        A sender is active if holder IS NOT NULL AND last_heartbeat is fresh.
+        Budget remaining alone is NOT sufficient — a crashed sender's budget
+        counter stays positive forever, blocking all receivers.
         """
         stale = self._stale_interval()
         def op(conn):
@@ -387,8 +382,8 @@ class DetectionCoordinator:
             cur.execute(
                 "SELECT count(*) FROM sender_lease "
                 "WHERE id = 1 AND holder IS NOT NULL "
-                "AND (push_remaining > 0 OR pause_remaining > 0 "
-                "OR last_heartbeat > NOW() - INTERVAL '" + stale + " seconds')"
+                "AND last_heartbeat IS NOT NULL "
+                "AND last_heartbeat > NOW() - INTERVAL '" + stale + " seconds'"
             )
             result = cur.fetchone()[0] > 0
             cur.close()
@@ -410,8 +405,8 @@ class DetectionCoordinator:
             cur.execute(
                 "SELECT phase FROM sender_lease "
                 "WHERE id = 1 AND holder IS NOT NULL "
-                "AND (push_remaining > 0 OR pause_remaining > 0 "
-                "OR last_heartbeat > NOW() - INTERVAL '" + stale + " seconds')"
+                "AND last_heartbeat IS NOT NULL "
+                "AND last_heartbeat > NOW() - INTERVAL '" + stale + " seconds'"
             )
             row = cur.fetchone()
             cur.close()
