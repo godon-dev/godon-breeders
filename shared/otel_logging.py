@@ -84,7 +84,16 @@ def get_logger(name: str, service_name: str = None) -> logging.Logger:
     logger = logging.getLogger(name)
     logger.setLevel(logging.DEBUG)
     
-    if not any(isinstance(h, LoggingHandler) for h in logger.handlers):
+    # Always ensure a stdout handler so logs appear in Windmill job_logs
+    if not any(isinstance(h, logging.StreamHandler) for h in logger.handlers):
+        import sys
+        sh = logging.StreamHandler(sys.stdout)
+        sh.setLevel(logging.DEBUG)
+        sh.setFormatter(logging.Formatter('%(name)s %(levelname)s: %(message)s'))
+        logger.addHandler(sh)
+    
+    # Add OTLP handler if provider initialized successfully
+    if _logger_provider and not any(isinstance(h, LoggingHandler) for h in logger.handlers):
         handler = LoggingHandler(logger_provider=_logger_provider)
         logger.addHandler(handler)
     
