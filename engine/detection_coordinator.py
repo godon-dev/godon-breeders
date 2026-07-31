@@ -293,6 +293,32 @@ class DetectionCoordinator:
         except Exception as e:
             logger.warning(f"Failed to set lease phase: {e}")
 
+    def _read_lease_budget(self) -> tuple:
+        """Read current (phase, push_remaining, pause_remaining) from the lease.
+
+        Returns (None, 0, 0) if we don't hold the lease.
+        Used to detect resume-after-restart: if the lease already has
+        budget for our current phase, skip re-initialization.
+        """
+        def op(conn):
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT phase, push_remaining, pause_remaining "
+                "FROM sender_lease WHERE id = 1 "
+                "AND holder = %s AND token = %s",
+                (self.breeder_id, self._lease_token)
+            )
+            row = cur.fetchone()
+            cur.close()
+            return row
+        try:
+            row = self._db(op, "read_lease_budget")
+            if row:
+                return row[0], row[1] or 0, row[2] or 0
+        except Exception as e:
+            logger.warning(f"Failed to read lease budget: {e}")
+        return None, 0, 0
+
     def _heartbeat(self) -> bool:
         """Update last_heartbeat for the current lease.
 
@@ -971,16 +997,18 @@ class DetectionCoordinator:
         AIMD moves to between rounds: adjust next round's starting scale
         based on this round's FAIL rate.
         """
-        # Budget management: set on entry, decrement on subsequent trials
-        if self._push_count == 0:
-            # Entering PUSH — initialize the push budget
+        # Budget management: check lease state to handle resume-after-restart
+        lease_phase, lease_push_rem, _ = self._read_lease_budget()
+        if self._push_count == 0 and lease_phase != self.PUSH:
             logger.info(
                 f"PUSH: entering push phase — "
                 f"scale={self._locked_scale:.3f}, budget={self.push_block_size} trials"
             )
             self._set_lease_phase(self.PUSH, push_budget=self.push_block_size)
+        elif self._push_count == 0 and lease_phase == self.PUSH and lease_push_rem > 0:
+            self._push_count = self.push_block_size - lease_push_rem
+            logger.info(f"PUSH: resuming after restart — count={self._push_count}/{self.push_block_size}")
         else:
-            # Continuing — previous PUSH trial completed, decrement budget
             self._decrement_budget(self.PUSH)
 
         params = self._get_impulse_params(self._locked_scale)
@@ -1015,15 +1043,17 @@ class DetectionCoordinator:
         the receiver is holding at. The coupling signal should recover.
         The observer uses push vs pause to compute the falling edge.
         """
-        # Budget management: set on entry, decrement on subsequent trials
-        if self._pause_count == 0:
-            # Entering PAUSE — initialize the pause budget
+        # Budget management: check lease state to handle resume-after-restart
+        lease_phase, _, lease_pause_rem = self._read_lease_budget()
+        if self._pause_count == 0 and lease_phase != self.PAUSE:
             logger.info(
                 f"PAUSE: entering pause phase — budget={self.pause_block_size} trials"
             )
             self._set_lease_phase(self.PAUSE, pause_budget=self.pause_block_size)
+        elif self._pause_count == 0 and lease_phase == self.PAUSE and lease_pause_rem > 0:
+            self._pause_count = self.pause_block_size - lease_pause_rem
+            logger.info(f"PAUSE: resuming after restart — count={self._pause_count}/{self.pause_block_size}")
         else:
-            # Continuing — previous PAUSE trial completed, decrement budget
             self._decrement_budget(self.PAUSE)
 
         params = self._get_neutral_params()
