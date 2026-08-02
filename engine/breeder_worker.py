@@ -46,7 +46,7 @@ from scipy.stats import percentileofscore
 from f.breeder.engine.breeder_metrics_client import BreederMetricsClient
 from f.breeder.engine.communication import CommunicationCallback
 from f.breeder.engine.strain_loader import load_strain
-from f.breeder.engine.watermark import create_watermark, Watermark
+
 from f.breeder.shared.otel_logging import get_logger
 
 logger = get_logger(__name__)
@@ -152,15 +152,10 @@ class BreederWorker:
 
         self._register_interference_breeder()
 
-        settings = config.get('settings', {})
-        self.watermark = None
-        if self._has_active_neighbors():
-            self.watermark = create_watermark(config, settings, breeder_uuid=self.breeder_uuid)
-            if self.watermark:
-                logger.info(f"Watermarking enabled: {self.watermark.metadata()}")
-        self._watermark_trial_idx = 0
-        self._wm_corrected_params = None
-        self._watermark_baseline = self._compute_baseline_params(settings)
+        # Legacy spectral watermark system REMOVED.
+        # Block design coordinated detection (push/pause/hold via DetectionCoordinator)
+        # replaces it entirely.
+        self._watermark_baseline = self._compute_baseline_params(config.get('settings', {}))
 
         # Detection coordinator — initialized in __init__
 
@@ -1023,40 +1018,6 @@ class BreederWorker:
                             )
                             continue
 
-                    if not self.watermark and self._has_active_neighbors():
-                        self.watermark = create_watermark(self.config, self.config.get('settings', {}), breeder_uuid=self.breeder_uuid)
-                        if self.watermark:
-                            logger.info(f"Watermarking activated (lazy): {self.watermark.metadata()}")
-
-                    # Old spectral watermark system is DISABLED.
-                    # Block design coordinated detection (push/pause) replaces it entirely.
-                    # The watermark code below is kept for reference but never executes.
-                    if False and self.watermark and detection_mode not in ('hold', 'impulse'):
-                        wm_complete = hasattr(self.watermark, 'is_complete') and self.watermark.is_complete()
-                        if not wm_complete:
-                            wm_params = self.watermark.generate(self._watermark_trial_idx, params)
-                            # Determine if this is an active impulse trial
-                            is_impulse = hasattr(self.watermark, 'is_impulse_trial') and self.watermark.is_impulse_trial(self._watermark_trial_idx)
-                            if wm_params:
-                                params = wm_params
-                                # Store corrected params for Optuna — we'll inject them via
-                                # study.add_trial() after study.tell() to avoid the sampler's
-                                # original values being recorded for watermarked params.
-                                self._wm_corrected_params = {
-                                    pname: pval for pname, pval in wm_params.items()
-                                    if pname in trial.params and trial.params[pname] != pval
-                                }
-                                wm_meta = self.watermark.metadata()
-                                if is_impulse:
-                                    wm_meta['active'] = True
-                                trial.set_user_attr('watermark', json.dumps(wm_meta))
-                                trial.set_user_attr('watermark_trial_idx', self._watermark_trial_idx)
-                            else:
-                                trial.set_user_attr('watermark', 'off')
-                                trial.set_user_attr('watermark_trial_idx', self._watermark_trial_idx)
-                            self._watermark_trial_idx += 1
-                            logger.info(f"Watermark trial {self._watermark_trial_idx}: impulse={'ON' if is_impulse else 'off'}")
-
                     if params:
                         metrics = self._execute_trial(params)
                     else:
@@ -1137,27 +1098,6 @@ class BreederWorker:
                             lambda: self.study.tell(trial, values),
                             f"study.tell (trial {trial.number})"
                         )
-
-                        # If watermarking was active, inject corrected params into Optuna.
-                        # The original trial has the sampler's values for watermarked params.
-                        # We add a corrected trial with the actual values so the sampler
-                        # learns the true relationship.
-                        corrected = getattr(self, '_wm_corrected_params', None)
-                        if corrected:
-                            try:
-                                from optuna.trial import create_trial
-                                all_params = dict(trial.params)
-                                all_params.update(corrected)
-                                corrected_trial = create_trial(
-                                    params=all_params,
-                                    distributions=dict(trial.distributions),
-                                    values=values,
-                                )
-                                self.study.add_trial(corrected_trial)
-                                logger.info(f"Injected corrected trial with watermark params")
-                            except Exception as e:
-                                logger.warning(f"Failed to inject corrected trial: {e}")
-                            self._wm_corrected_params = None
 
                         trial_duration = time.time() - trial_start_time
 

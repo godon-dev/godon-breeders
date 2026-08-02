@@ -662,6 +662,9 @@ class DetectionCoordinator:
             self._cleanup_stale_state()
             self._initialized = True
 
+        # State-transition trace — log every trial's starting state
+        logger.info(f"COORDINATOR trial={trial.number} state={self.state} breeder={self.breeder_id[:8]}")
+
         # ── Heartbeat for sender states ──────────────────────────────
         # Updates last_heartbeat (for crash recovery) and verifies we still
         # hold the lease via the fencing token. If another breeder stole the
