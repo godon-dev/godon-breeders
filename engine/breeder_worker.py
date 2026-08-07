@@ -406,6 +406,9 @@ class BreederWorker:
         if time.time() - self._last_heartbeat_ts < self._heartbeat_interval:
             return
         self._last_heartbeat_ts = time.time()
+        # Don't register if shutdown has been requested
+        if self._check_shutdown_requested():
+            return
         self._register_interference_breeder()
 
     def _has_active_neighbors(self) -> bool:
