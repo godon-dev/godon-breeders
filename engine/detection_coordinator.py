@@ -89,6 +89,12 @@ class DetectionCoordinator:
     MAX_CALIB_WAIT = 30  # extra trials beyond hold_calib_trials to wait for partner
     MAX_HOLD_CALIB_SEARCH = 40  # max hold_calib trials before giving up on flat params
 
+    # TBD: derive these from observed median trial duration instead of
+    # hardcoding, same approach as STALE_SENDER_MULTIPLIER below.
+    ACTIVE_BREEDER_WINDOW_SECONDS = 360   # ~8 trials @ 45s/trial before breeder declared dead
+    READINESS_VALID_SECONDS = 180         # ~4 trials for partner to respond to barrier
+    READINESS_CLEANUP_MINUTES = 10        # housekeeping, 2x active window
+
     # Hold calibration: how flat the signal must be
     MAX_CALIB_STD = 0.05    # objective std must be below this to accept params
     MIN_CALIB_SAMPLES = 5   # need at least this many samples to evaluate flatness
@@ -109,13 +115,18 @@ class DetectionCoordinator:
         self._compute_neutral_params_fn = compute_neutral_params_fn
         self._breeder_db_name = f"breeder_{breeder_id.replace('-', '_')}"
 
-        # Config
         det_cfg = config.get('interference_detection', config.get('detection', {}))
+        self.group_id = det_cfg.get('group', config.get('group', 'default'))
+
         self.min_optimize_trials = det_cfg.get('min_optimize_trials', 15)
         self.hold_calib_trials = det_cfg.get('hold_calib_trials', 5)
         self.push_block_size = det_cfg.get('push_block_size', 15)
         self.pause_block_size = det_cfg.get('pause_block_size', 15)
         self.cooldown_trials = det_cfg.get('cooldown_trials', 5)
+
+        self.active_breeder_window = det_cfg.get('active_breeder_window', self.ACTIVE_BREEDER_WINDOW_SECONDS)
+        self.readiness_valid_seconds = det_cfg.get('readiness_valid_seconds', self.READINESS_VALID_SECONDS)
+        self.readiness_cleanup_minutes = det_cfg.get('readiness_cleanup_minutes', self.READINESS_CLEANUP_MINUTES)
 
         # State
         self.state = self.OPTIMIZE
@@ -157,39 +168,62 @@ class DetectionCoordinator:
         return str(self.STALE_SENDER_MULTIPLIER * self.WORST_CASE_TRIAL_SECONDS)
 
     def _ensure_tables(self):
-        """Create lease table and readiness table. Called once at init.
+        """Create coordination tables. Called once at init.
 
-        The sender_lease table uses a count-based budget (push_remaining,
-        pause_remaining) instead of a time-based expiry. The lease does NOT
-        expire by time — it lasts as long as the sender has budget remaining.
-        last_heartbeat is used solely for crash-recovery staleness detection.
+        All coordination state is scoped by group_id — breeders in different
+        groups coordinate independently. Each group has its own lease,
+        readiness barrier, and neighbor awareness.
+
+        For upgrades from the old global singleton schema (id=1, CHECK id=1),
+        migration drops the old table. Coordination state is ephemeral.
         """
         def op(conn):
             cur = conn.cursor()
+
+            # Check if old singleton schema exists (id column with CHECK id=1)
+            cur.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'sender_lease' AND column_name = 'id'"
+            )
+            if cur.fetchone():
+                logger.info("Migrating sender_lease from global singleton to group-scoped schema")
+                cur.execute("DROP TABLE sender_lease")
+
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS sender_lease (
-                    id INT PRIMARY KEY DEFAULT 1,
+                    group_id VARCHAR(255) PRIMARY KEY,
                     holder VARCHAR(255),
                     token INT DEFAULT 0,
                     phase VARCHAR(50),
                     push_remaining INT DEFAULT 0,
                     pause_remaining INT DEFAULT 0,
-                    last_heartbeat TIMESTAMPTZ,
-                    CHECK (id = 1)
+                    last_heartbeat TIMESTAMPTZ
                 )
             """)
             cur.execute(
                 "INSERT INTO sender_lease "
-                "(id, holder, token, phase, push_remaining, pause_remaining, last_heartbeat) "
-                "VALUES (1, NULL, 0, NULL, 0, 0, NULL) ON CONFLICT (id) DO NOTHING"
+                "(group_id, holder, token, phase, push_remaining, pause_remaining, last_heartbeat) "
+                "VALUES (%s, NULL, 0, NULL, 0, 0, NULL) ON CONFLICT (group_id) DO NOTHING",
+                (self.group_id,)
             )
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS detection_readiness (
                     breeder_id VARCHAR(255) PRIMARY KEY,
+                    group_id VARCHAR(255) NOT NULL DEFAULT 'default',
                     ready_for VARCHAR(50) NOT NULL,
                     ready_at TIMESTAMPTZ DEFAULT NOW()
                 )
             """)
+            # Migration: add group_id to detection_readiness if missing
+            cur.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'detection_readiness' AND column_name = 'group_id'"
+            )
+            if not cur.fetchone():
+                cur.execute(
+                    "ALTER TABLE detection_readiness "
+                    "ADD COLUMN IF NOT EXISTS group_id VARCHAR(255) NOT NULL DEFAULT 'default'"
+                )
             cur.close()
         try:
             self._db(op, "ensure_tables")
@@ -210,13 +244,14 @@ class DetectionCoordinator:
                 "UPDATE sender_lease "
                 "SET holder = NULL, phase = NULL, "
                 "push_remaining = 0, pause_remaining = 0 "
-                "WHERE id = 1 AND holder IS NOT NULL "
+                "WHERE group_id = %s AND holder IS NOT NULL "
                 "AND (last_heartbeat IS NULL "
-                "OR last_heartbeat < NOW() - INTERVAL '" + stale + " seconds')"
+                "OR last_heartbeat < NOW() - INTERVAL '" + stale + " seconds')",
+                (self.group_id,)
             )
             cur.execute(
                 "DELETE FROM detection_readiness "
-                "WHERE ready_at < NOW() - INTERVAL '10 minutes'"
+                "WHERE ready_at < NOW() - INTERVAL '" + str(self.readiness_cleanup_minutes) + " minutes'"
             )
             cur.close()
         try:
@@ -244,16 +279,17 @@ class DetectionCoordinator:
                 "SET holder = %s, token = token + 1, phase = %s, "
                 "push_remaining = 0, pause_remaining = 0, "
                 "last_heartbeat = NOW() "
-                "WHERE id = 1 AND ("
+                "WHERE group_id = %s AND ("
                 "holder IS NULL "
                 "OR last_heartbeat IS NULL "
                 "OR last_heartbeat < NOW() - INTERVAL '" + stale + " seconds'"
                 ")",
-                (self.breeder_id, phase)
+                (self.breeder_id, phase, self.group_id)
             )
             updated = cur.rowcount
             if updated > 0:
-                cur.execute("SELECT token FROM sender_lease WHERE id = 1")
+                cur.execute("SELECT token FROM sender_lease WHERE group_id = %s",
+                            (self.group_id,))
                 self._lease_token = cur.fetchone()[0]
             cur.close()
             return updated > 0
@@ -281,10 +317,10 @@ class DetectionCoordinator:
             if pause_budget is not None:
                 sets.append("pause_remaining = %s")
                 params.append(pause_budget)
-            params.extend([self.breeder_id, self._lease_token])
+            params.extend([self.group_id, self.breeder_id, self._lease_token])
             cur.execute(
                 "UPDATE sender_lease SET " + ", ".join(sets) + " "
-                "WHERE id = 1 AND holder = %s AND token = %s",
+                "WHERE group_id = %s AND holder = %s AND token = %s",
                 params
             )
             cur.close()
@@ -304,9 +340,9 @@ class DetectionCoordinator:
             cur = conn.cursor()
             cur.execute(
                 "SELECT phase, push_remaining, pause_remaining "
-                "FROM sender_lease WHERE id = 1 "
+                "FROM sender_lease WHERE group_id = %s "
                 "AND holder = %s AND token = %s",
-                (self.breeder_id, self._lease_token)
+                (self.group_id, self.breeder_id, self._lease_token)
             )
             row = cur.fetchone()
             cur.close()
@@ -330,8 +366,8 @@ class DetectionCoordinator:
             cur = conn.cursor()
             cur.execute(
                 "UPDATE sender_lease SET last_heartbeat = NOW() "
-                "WHERE id = 1 AND holder = %s AND token = %s",
-                (self.breeder_id, self._lease_token)
+                "WHERE group_id = %s AND holder = %s AND token = %s",
+                (self.group_id, self.breeder_id, self._lease_token)
             )
             result = cur.rowcount > 0
             cur.close()
@@ -356,16 +392,16 @@ class DetectionCoordinator:
                     "UPDATE sender_lease "
                     "SET phase = %s, "
                     "push_remaining = GREATEST(push_remaining - 1, 0) "
-                    "WHERE id = 1 AND holder = %s AND token = %s",
-                    (phase, self.breeder_id, self._lease_token)
+                    "WHERE group_id = %s AND holder = %s AND token = %s",
+                    (phase, self.group_id, self.breeder_id, self._lease_token)
                 )
             elif phase == self.PAUSE:
                 cur.execute(
                     "UPDATE sender_lease "
                     "SET phase = %s, "
                     "pause_remaining = GREATEST(pause_remaining - 1, 0) "
-                    "WHERE id = 1 AND holder = %s AND token = %s",
-                    (phase, self.breeder_id, self._lease_token)
+                    "WHERE group_id = %s AND holder = %s AND token = %s",
+                    (phase, self.group_id, self.breeder_id, self._lease_token)
                 )
             cur.close()
         try:
@@ -385,8 +421,8 @@ class DetectionCoordinator:
                 "UPDATE sender_lease "
                 "SET holder = NULL, phase = NULL, "
                 "push_remaining = 0, pause_remaining = 0 "
-                "WHERE id = 1 AND holder = %s AND token = %s",
-                (self.breeder_id, self._lease_token)
+                "WHERE group_id = %s AND holder = %s AND token = %s",
+                (self.group_id, self.breeder_id, self._lease_token)
             )
             cur.close()
         try:
@@ -407,9 +443,10 @@ class DetectionCoordinator:
             cur = conn.cursor()
             cur.execute(
                 "SELECT count(*) FROM sender_lease "
-                "WHERE id = 1 AND holder IS NOT NULL "
+                "WHERE group_id = %s AND holder IS NOT NULL "
                 "AND last_heartbeat IS NOT NULL "
-                "AND last_heartbeat > NOW() - INTERVAL '" + stale + " seconds'"
+                "AND last_heartbeat > NOW() - INTERVAL '" + stale + " seconds'",
+                (self.group_id,)
             )
             result = cur.fetchone()[0] > 0
             cur.close()
@@ -430,9 +467,10 @@ class DetectionCoordinator:
             cur = conn.cursor()
             cur.execute(
                 "SELECT phase FROM sender_lease "
-                "WHERE id = 1 AND holder IS NOT NULL "
+                "WHERE group_id = %s AND holder IS NOT NULL "
                 "AND last_heartbeat IS NOT NULL "
-                "AND last_heartbeat > NOW() - INTERVAL '" + stale + " seconds'"
+                "AND last_heartbeat > NOW() - INTERVAL '" + stale + " seconds'",
+                (self.group_id,)
             )
             row = cur.fetchone()
             cur.close()
@@ -453,9 +491,10 @@ class DetectionCoordinator:
             cur = conn.cursor()
             cur.execute(
                 "SELECT count(*) FROM sender_lease "
-                "WHERE id = 1 AND holder IS NOT NULL "
+                "WHERE group_id = %s AND holder IS NOT NULL "
                 "AND (last_heartbeat IS NULL "
-                "OR last_heartbeat < NOW() - INTERVAL '" + stale + " seconds')"
+                "OR last_heartbeat < NOW() - INTERVAL '" + stale + " seconds')",
+                (self.group_id,)
             )
             result = cur.fetchone()[0] > 0
             cur.close()
@@ -472,11 +511,11 @@ class DetectionCoordinator:
         def op(conn):
             cur = conn.cursor()
             cur.execute(
-                "INSERT INTO detection_readiness (breeder_id, ready_for, ready_at) "
-                "VALUES (%s, %s, NOW()) "
+                "INSERT INTO detection_readiness (breeder_id, group_id, ready_for, ready_at) "
+                "VALUES (%s, %s, %s, NOW()) "
                 "ON CONFLICT (breeder_id) DO UPDATE "
-                "SET ready_for = %s, ready_at = NOW()",
-                (self.breeder_id, phase, phase)
+                "SET group_id = %s, ready_for = %s, ready_at = NOW()",
+                (self.breeder_id, self.group_id, phase, self.group_id, phase)
             )
             cur.close()
         try:
@@ -499,27 +538,24 @@ class DetectionCoordinator:
             pass
 
     def _check_all_ready(self, phase: str) -> bool:
-        """Check if all active breeders have signaled readiness for this phase.
+        """Check if all active breeders in this group have signaled readiness.
 
         A breeder is 'active' if seen in interference_active_breeders within 6 min.
         A readiness signal is valid for 3 minutes.
-        Requires at least 2 active breeders.
-
-        NOTE: This barrier is ONLY used when hold_params are NOT from config
-        (i.e. during flatness-search calibration). When hold_params come from
-        config, the readiness barrier is skipped entirely.
+        Requires at least 2 active breeders in the group.
         """
         def op(conn):
             cur = conn.cursor()
             cur.execute(
                 "SELECT COUNT(*) FROM interference_active_breeders "
-                "WHERE last_seen > NOW() - INTERVAL '360 seconds'"
+                "WHERE group_id = %s AND last_seen > NOW() - INTERVAL '" + str(self.active_breeder_window) + " seconds'",
+                (self.group_id,)
             )
             n_active = cur.fetchone()[0]
             cur.execute(
                 "SELECT COUNT(*) FROM detection_readiness "
-                "WHERE ready_for = %s AND ready_at > NOW() - INTERVAL '180 seconds'",
-                (phase,)
+                "WHERE group_id = %s AND ready_for = %s AND ready_at > NOW() - INTERVAL '" + str(self.readiness_valid_seconds) + " seconds'",
+                (self.group_id, phase)
             )
             n_ready = cur.fetchone()[0]
             cur.close()
@@ -531,12 +567,13 @@ class DetectionCoordinator:
             return False
 
     def _count_active_breeders(self) -> int:
-        """Count breeders active in the last 6 minutes."""
+        """Count breeders active in this group in the last 6 minutes."""
         def op(conn):
             cur = conn.cursor()
             cur.execute(
                 "SELECT COUNT(*) FROM interference_active_breeders "
-                "WHERE last_seen > NOW() - INTERVAL '360 seconds'"
+                "WHERE group_id = %s AND last_seen > NOW() - INTERVAL '" + str(self.active_breeder_window) + " seconds'",
+                (self.group_id,)
             )
             count = cur.fetchone()[0]
             cur.close()

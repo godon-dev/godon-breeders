@@ -100,6 +100,9 @@ class BreederWorker:
         self.breeder_type = breeder_config.get('type', 'unknown_breeder')
         self.breeder_uuid = breeder_config.get('uuid', breeder_config.get('name', 'unknown'))
         self.breeder_id = self.breeder_uuid
+
+        det_cfg = config.get('interference_detection', config.get('detection', {}))
+        self._group_id = det_cfg.get('group', config.get('group', 'default'))
         self.breeder_db_name = f"breeder_{self.breeder_uuid.replace('-', '_')}"
         self.worker_id = f"{self.breeder_type}_worker_{self.breeder_uuid}"
 
@@ -373,13 +376,25 @@ class BreederWorker:
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS interference_active_breeders (
                     breeder_id VARCHAR(255) PRIMARY KEY,
+                    group_id VARCHAR(255) NOT NULL DEFAULT 'default',
                     last_seen TIMESTAMPTZ DEFAULT NOW()
                 )
             """)
+            # Migration: add group_id if missing
             cur.execute(
-                "INSERT INTO interference_active_breeders (breeder_id, last_seen) "
-                "VALUES (%s, NOW()) ON CONFLICT (breeder_id) DO UPDATE SET last_seen = NOW()",
-                (self.breeder_id,)
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'interference_active_breeders' AND column_name = 'group_id'"
+            )
+            if not cur.fetchone():
+                cur.execute(
+                    "ALTER TABLE interference_active_breeders "
+                    "ADD COLUMN IF NOT EXISTS group_id VARCHAR(255) NOT NULL DEFAULT 'default'"
+                )
+            cur.execute(
+                "INSERT INTO interference_active_breeders (breeder_id, group_id, last_seen) "
+                "VALUES (%s, %s, NOW()) ON CONFLICT (breeder_id) DO UPDATE "
+                "SET group_id = %s, last_seen = NOW()",
+                (self.breeder_id, self._group_id, self._group_id)
             )
             cur.close()
         try:
@@ -396,10 +411,12 @@ class BreederWorker:
     def _has_active_neighbors(self) -> bool:
         def op(conn):
             cur = conn.cursor()
+            active_window = str(self._detection_coordinator.active_breeder_window)
             cur.execute(
                 "SELECT COUNT(*) FROM interference_active_breeders "
-                "WHERE breeder_id != %s AND last_seen > NOW() - INTERVAL '360 seconds'",
-                (self.breeder_id,)
+                "WHERE group_id = %s AND breeder_id != %s "
+                "AND last_seen > NOW() - INTERVAL '" + active_window + " seconds'",
+                (self._group_id, self.breeder_id)
             )
             count = cur.fetchone()[0]
             cur.close()
