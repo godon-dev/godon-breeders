@@ -119,9 +119,9 @@ class BreederWorker:
         self.study = self._load_or_create_study()
         self.communication_callback = self._setup_communication()
 
-        # Initialize detection coordinator
-        from f.breeder.engine.detection_coordinator import DetectionCoordinator
-        self._detection_coordinator = DetectionCoordinator(
+        # Initialize probe coordinator
+        from f.breeder.engine.probe_coordinator import ProbeCoordinator
+        self._probe_coordinator = ProbeCoordinator(
             breeder_id=self.breeder_id,
             config=self.config,
             shared_db_fn=self._with_shared_db,
@@ -414,7 +414,7 @@ class BreederWorker:
     def _has_active_neighbors(self) -> bool:
         def op(conn):
             cur = conn.cursor()
-            active_window = str(self._detection_coordinator.active_breeder_window)
+            active_window = str(self._probe_coordinator.active_breeder_window)
             cur.execute(
                 "SELECT COUNT(*) FROM interference_active_breeders "
                 "WHERE group_id = %s AND breeder_id != %s "
@@ -1006,16 +1006,22 @@ class BreederWorker:
 
                 try:
                     # === Detection Coordinator ===
-                    decision = self._detection_coordinator.decide_trial(trial)
+                    decision = self._probe_coordinator.decide_trial(trial)
                     detection_mode = decision['mode']
 
                     # Tag trial for observer
                     trial.set_user_attr('detection_mode', detection_mode)
-                    trial.set_user_attr('coord_state', self._detection_coordinator.get_state())
+                    trial.set_user_attr('coord_state', self._probe_coordinator.get_state())
                     if decision.get('impulse_phase'):
                         trial.set_user_attr('impulse_phase', decision['impulse_phase'])
                     if decision.get('impulse_scale') is not None:
                         trial.set_user_attr('impulse_scale', decision['impulse_scale'])
+                    if decision.get('probe_param') is not None:
+                        trial.set_user_attr('probe_param', decision['probe_param'])
+                    if decision.get('probe_param_idx') is not None:
+                        trial.set_user_attr('probe_param_idx', decision['probe_param_idx'])
+                    if decision.get('probe_level') is not None:
+                        trial.set_user_attr('probe_level', decision['probe_level'])
                     if decision.get('lease_phase') is not None:
                         trial.set_user_attr('lease_phase', decision['lease_phase'])
 
@@ -1093,10 +1099,6 @@ class BreederWorker:
 
                         self._handle_guardrail_violation(params)
 
-                        # Notify coordinator of failure — triggers AIMD if in ping phase
-                        if self._detection_coordinator:
-                            self._detection_coordinator.on_guardrail_fail(params)
-
                         self.metrics.inc_trial('failed')
                         self.metrics.inc_effectuation('failure')
                     else:
@@ -1110,9 +1112,19 @@ class BreederWorker:
                         # Stash effectuation params BEFORE study.tell — trial is frozen after tell
                         trial.set_user_attr('effectuation_params', json.dumps(params))
 
-                        # Feed objective values to coordinator for hold calibration
-                        if self._detection_coordinator:
-                            self._detection_coordinator.record_calib_observation(values)
+                        # If receiver HOLD trial: write observations to shared table
+                        if detection_mode == 'hold' and hasattr(self._probe_coordinator, 'record_receiver_observation'):
+                            obj_readings = {}
+                            for obj in self.config.get('objectives', []):
+                                oname = obj.get('name', 'unknown')
+                                if oname in metrics:
+                                    obj_readings[oname] = metrics[oname]
+                            if obj_readings:
+                                self._probe_coordinator.record_receiver_observation(
+                                    trial_num=trial.number,
+                                    objective_values=obj_readings,
+                                    lease_phase=decision.get('lease_phase'),
+                                )
 
                         self._retry_op(
                             lambda: self.study.tell(trial, values),
@@ -1120,6 +1132,10 @@ class BreederWorker:
                         )
 
                         trial_duration = time.time() - trial_start_time
+
+                        # Track trial duration for causal timeout deskew
+                        if hasattr(self._probe_coordinator, '_record_trial_duration'):
+                            self._probe_coordinator._record_trial_duration(trial_duration)
 
                         logger.info(f"Trial {trial.number} completed with values: {values}")
 

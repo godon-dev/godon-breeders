@@ -35,8 +35,8 @@ sys.modules['optuna.samplers'] = MagicMock()
 sys.modules['f'] = MagicMock()
 sys.modules['f.breeder'] = MagicMock()
 sys.modules['f.breeder.engine'] = MagicMock()
-sys.modules['f.breeder.engine.detection_coordinator'] = MagicMock()
-sys.modules['f.breeder.engine.detection_coordinator'].DetectionCoordinator = MagicMock
+sys.modules['f.breeder.engine.probe_coordinator'] = MagicMock()
+sys.modules['f.breeder.engine.probe_coordinator'].ProbeCoordinator = MagicMock
 sys.modules['f.breeder.engine.breeder_metrics_client'] = MagicMock()
 sys.modules['f.breeder.engine.breeder_metrics_client'].BreederMetricsClient = MagicMock
 sys.modules['f.breeder.engine.communication'] = MagicMock()
@@ -460,7 +460,7 @@ class TestRunLoop:
         worker.communication_callback = mock_comm
 
         # Mock the detection coordinator to return optimize mode with no params
-        worker._detection_coordinator.decide_trial.return_value = {
+        worker._probe_coordinator.decide_trial.return_value = {
             'mode': 'optimize', 'params': None
         }
 
