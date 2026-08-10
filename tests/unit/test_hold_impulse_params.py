@@ -32,7 +32,7 @@ sys.modules['f.breeder.shared.otel_logging'] = otel_mock
 
 # Mock Windmill package namespace for breeder_worker internal imports
 for mod_path in ['f', 'f.breeder', 'f.breeder.engine',
-                 'f.breeder.engine.detection_coordinator',
+                 'f.breeder.engine.probe_coordinator',
                  'f.breeder.engine.breeder_metrics_client',
                  'f.breeder.engine.communication',
                  'f.breeder.engine.strain_loader',
@@ -44,7 +44,7 @@ for mod_path in ['f', 'f.breeder', 'f.breeder.engine',
         setattr(sys.modules[parent], parts[-1], mock_mod)
     sys.modules[mod_path] = mock_mod
 
-sys.modules['f.breeder.engine.detection_coordinator'].DetectionCoordinator = MagicMock
+sys.modules['f.breeder.engine.probe_coordinator'].ProbeCoordinator = MagicMock
 sys.modules['f.breeder.engine.breeder_metrics_client'].BreederMetricsClient = MagicMock
 sys.modules['f.breeder.engine.communication'].CommunicationCallback = MagicMock
 sys.modules['f.breeder.engine.strain_loader'].load_strain = MagicMock(return_value=MagicMock())

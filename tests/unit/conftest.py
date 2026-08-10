@@ -7,31 +7,24 @@ import types
 import logging
 
 # Stub f.breeder.shared.otel_logging
-if 'f' not in sys.modules:
-    f_mod = types.ModuleType('f')
-    breeder_mod = types.ModuleType('f.breeder')
-    shared_mod = types.ModuleType('f.breeder.shared')
-    otel_mod = types.ModuleType('f.breeder.shared.otel_logging')
-    engine_mod = types.ModuleType('f.breeder.engine')
+f_mod = types.ModuleType('f')
+breeder_mod = types.ModuleType('f.breeder')
+shared_mod = types.ModuleType('f.breeder.shared')
+otel_mod = types.ModuleType('f.breeder.shared.otel_logging')
+engine_mod = types.ModuleType('f.breeder.engine')
 
-    def get_logger(name):
-        return logging.getLogger(name)
+def get_logger(name):
+    return logging.getLogger(name)
 
-    otel_mod.get_logger = get_logger
+otel_mod.get_logger = get_logger
 
-    f_mod.breeder = breeder_mod
-    breeder_mod.shared = shared_mod
-    shared_mod.otel_logging = otel_mod
-    breeder_mod.engine = engine_mod
+f_mod.breeder = breeder_mod
+breeder_mod.shared = shared_mod
+shared_mod.otel_logging = otel_mod
+breeder_mod.engine = engine_mod
 
-    sys.modules['f'] = f_mod
-    sys.modules['f.breeder'] = breeder_mod
-    sys.modules['f.breeder.shared'] = shared_mod
-    sys.modules['f.breeder.shared.otel_logging'] = otel_mod
-    sys.modules['f.breeder.engine'] = engine_mod
-
-# Make engine importable as f.breeder.engine.xxx → redirect to engine.xxx
-import importlib
-engine_real = importlib.import_module('engine')
-for name in dir(engine_real):
-    setattr(engine_mod, name, getattr(engine_real, name))
+sys.modules['f'] = f_mod
+sys.modules['f.breeder'] = breeder_mod
+sys.modules['f.breeder.shared'] = shared_mod
+sys.modules['f.breeder.shared.otel_logging'] = otel_mod
+sys.modules['f.breeder.engine'] = engine_mod

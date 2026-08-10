@@ -25,7 +25,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
 
-from engine.detection_coordinator import DetectionCoordinator
+from engine.probe_coordinator import ProbeCoordinator
 
 
 def _mock_db(fn, desc):
@@ -56,7 +56,7 @@ def _make_config(hold_params=None):
 
 
 def _make_coord(breeder_id='sender-1', hold_params=None):
-    coord = DetectionCoordinator(
+    coord = ProbeCoordinator(
         breeder_id=breeder_id,
         config=_make_config(hold_params),
         shared_db_fn=_mock_db,
