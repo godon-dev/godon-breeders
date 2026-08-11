@@ -46,6 +46,7 @@ One sender at a time per group. Crash recovery via heartbeat staleness.
 """
 
 import logging
+import os
 import statistics
 from typing import Dict, Any, Optional, List, Callable
 from datetime import datetime
@@ -130,7 +131,7 @@ class ProbeCoordinator:
         self._trial_duration_history: List[float] = []  # seconds, rolling 10
         self._causal_url = det_cfg.get(
             'causal_url',
-            'http://godon-godon-causal:8091')
+            os.environ.get('GODON_CAUSAL_URL', 'http://godon-godon-causal:9091'))
 
         # State
         self.state = self.OPTIMIZE
