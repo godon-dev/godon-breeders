@@ -13,12 +13,21 @@ No separate detection phase. No extremistic top-3 push. Detection and
 characterization are the same process at different completeness.
 
 PROBE STRATEGY (what gets pushed):
-  Default: enumerate discrete levels from config constraints (step/lower/upper).
-           For each param, probe each level with all others at neutral.
-           Coverage guard: every param probed before any is revisited.
-  Override: operator specifies probe_override list in config — exact
-            params and levels. For when the operator or AI pilot already
-            knows what to measure.
+  Metaheuristic-driven stepped trial selection. One Optuna study per
+  param. The sampler picks levels adaptively via suggest_float(step=S),
+  guided by convergence delta from causal. Direction is maximize — the
+  sampler seeks informative regions (high delta = surface still moving).
+
+  Coverage guard: round-robin through non-converged params. The
+  metaheuristic handles level selection WITHIN each param.
+
+  Disposable studies for refinement: can't change step mid-study, so
+  close and create new at halved step. Curves persist in causal's
+  CurveRegistry across studies.
+
+  One trial, dual feed: the physical measurement feeds both the
+  optimization study (objective values, immediate tell) and the
+  characterization study (delta, delayed tell after pause + causal).
 
 FIRST level producing receiver response above CFAR threshold = detection.
 ACCUMULATED levels across a param = characterization (response curve).
@@ -108,7 +117,6 @@ class ProbeCoordinator:
 
         # Convergence state — set by causal responses
         self._converged_params: set = set()
-        self._refinement_passes: Dict[str, int] = {}  # per param, bisection passes done
 
         # Round timestamp tracking — for causal probe_result calls
         self._round_push_start: Optional[datetime] = None
@@ -135,9 +143,18 @@ class ProbeCoordinator:
         self._cooldown_count = 0
         self._hold_count = 0
 
-        # Probe schedule
-        self._probe_schedule: List[Dict[str, Any]] = []
-        self._probe_idx = 0
+        # Characterization studies — one per param, disposable per refinement level.
+        # The metaheuristic sampler picks stepped levels adaptively. Studies are
+        # short-lived: close on convergence or exhaustion, create new at halved
+        # step for refinement. Curves persist in causal's CurveRegistry.
+        self._char_studies: Dict[str, Any] = {}  # optuna.Study per param
+        self._char_steps: Dict[str, float] = {}   # current step per param
+        self._char_trials: Dict[str, Any] = {}    # in-flight trial per param
+        self._refinement_level: Dict[str, int] = {}  # refinement depth per param
+        self._param_order: List[str] = []
+        self._param_bounds: Dict[str, Dict] = {}  # name → {lower, upper, is_int, idx}
+        self._param_cycle_idx = 0
+        self._current_probe: Optional[Dict[str, Any]] = None
 
         # Neutral params (cached)
         self._neutral_params = None
@@ -641,18 +658,14 @@ class ProbeCoordinator:
         )
         return shift
 
-    def _process_probe_result(self, probe: dict):
+    def _process_probe_result(self, probe: dict) -> Optional[float]:
         """Called when a probe round (push + pause) completes.
 
         Calls causal to compute shift, update ResponseCurve, check
-        convergence. Causal owns all curves — coordinator just asks
-        "converged?" and skips remaining levels if so.
+        convergence. Returns delta for the characterization study.
 
-        Falls back gracefully: if causal is unreachable, continue
-        to next scheduled probe (blind, no convergence skip).
-
-        After a param's coarse pass completes without convergence,
-        generates bisection midpoints and appends to schedule.
+        Falls back gracefully: if causal is unreachable, returns None
+        (coordinator continues blind, trial told as FAIL to char study).
         """
         result = self._query_causal_probe_result(probe)
         if result is None:
@@ -660,183 +673,30 @@ class ProbeCoordinator:
                 f"PROBE_RESULT: causal unavailable — continuing blind "
                 f"for {probe['param_name']}"
             )
-            return
+            return None
 
+        delta = result.get('delta')
         converged = result.get('converged', False)
         param_name = probe['param_name']
 
         if converged:
-            logger.info(f"CONVERGED: {param_name} — skipping remaining levels")
+            logger.info(f"CONVERGED: {param_name}")
             self._converged_params.add(param_name)
-            self._skip_to_next_param(param_name)
 
-    def _check_param_complete(self, param_name: str):
-        """Check if all currently scheduled probes for this param are done.
+        return delta
 
-        If so and not converged and depth allows, generate next bisection
-        pass by halving the step and appending new levels.
+    # ─── Characterization Studies ────────────────────────────────────
+
+    def _init_characterization(self):
+        """Create characterization studies for all probe params.
+
+        One Optuna study per param. The sampler picks stepped levels
+        adaptively, guided by delta from causal. Direction is maximize:
+        the sampler seeks informative regions (high delta = surface
+        still moving). Halting comes from causal's convergence check.
         """
-        # All scheduled probes for this param done?
-        param_probe_indices = [
-            i for i, p in enumerate(self._probe_schedule)
-            if p['param_name'] == param_name
-        ]
-        if not param_probe_indices:
-            return
+        import optuna
 
-        last_probe_idx = max(param_probe_indices)
-        if self._probe_idx <= last_probe_idx:
-            return  # more probes still scheduled
-
-        # All done. Converged?
-        if param_name in self._converged_params:
-            return
-
-        # Depth allows?
-        passes_done = self._refinement_passes.get(param_name, 0)
-        if passes_done >= self.refinement_depth:
-            logger.info(
-                f"REFINEMENT: {param_name} exhausted "
-                f"(depth={self.refinement_depth}) — accepting best effort"
-            )
-            return
-
-        # Generate next pass: halve the step, regenerate grid, append new
-        self._generate_halved_levels(param_name)
-        self._refinement_passes[param_name] = passes_done + 1
-
-    def _generate_halved_levels(self, param_name: str):
-        """Append levels at half the current step.
-
-        Collect existing levels, find current minimum gap, halve it,
-        regenerate the grid at that step, append levels not yet probed.
-        """
-        neutral = self._get_neutral_params()
-        if not neutral:
-            return
-
-        existing = sorted(set(
-            p['level'] for p in self._probe_schedule
-            if p['param_name'] == param_name
-        ))
-        if len(existing) < 2:
-            return
-
-        # Current step = minimum gap between adjacent levels
-        gaps = [existing[i+1] - existing[i] for i in range(len(existing) - 1)]
-        current_step = min(gaps)
-        if current_step < 1e-9:
-            return  # can't subdivide further
-
-        new_step = current_step / 2.0
-
-        # Regenerate grid at new step
-        lo = existing[0]
-        hi = existing[-1]
-        existing_set = set(existing)
-        new_levels = []
-        v = lo
-        while v <= hi + 1e-9:
-            level = round(v, 6)
-            if level not in existing_set:
-                new_levels.append(level)
-                existing_set.add(level)
-            v += new_step
-
-        if not new_levels:
-            return
-
-        param_idx = next(
-            (p.get('param_idx') for p in self._probe_schedule
-             if p['param_name'] == param_name), 0)
-
-        for level in new_levels:
-            config = dict(neutral)
-            if isinstance(config.get(param_name), list):
-                config[param_name] = [level] * len(config[param_name])
-            else:
-                config[param_name] = level
-
-            self._probe_schedule.append({
-                'param_name': param_name,
-                'param_idx': param_idx,
-                'level': level,
-                'config': config,
-                'is_refinement': True,
-            })
-
-        logger.info(
-            f"REFINEMENT: {param_name} pass "
-            f"{self._refinement_passes.get(param_name, 0) + 1} "
-            f"step={current_step:.2f}→{new_step:.2f} "
-            f"added {len(new_levels)} levels: {new_levels}"
-        )
-
-    def _skip_to_next_param(self, current_param: str):
-        """Advance probe_idx past all remaining levels for a converged param."""
-        while self._probe_idx < len(self._probe_schedule):
-            probe = self._probe_schedule[self._probe_idx]
-            if probe['param_name'] != current_param:
-                break
-            self._probe_idx += 1
-
-    # ─── Probe Schedule ──────────────────────────────────────────────
-
-    def _derive_initial_step(self, lower: float, upper: float,
-                             is_int: bool = False) -> float:
-        """Derive starting step size from convergence threshold.
-
-        The threshold defines characterization precision: how much the
-        interpolated response curve can move when a new point is added
-        before we consider it converged. The step size defines how far
-        apart the initial probe points are.
-
-        Coarse threshold → few wide-spaced probes, fast but crude.
-        Tight threshold → many fine probes, slow but precise.
-
-        We start coarse (range / 4) and let the convergence mechanism
-        refine locally via recursive substeps where the curve moves most.
-        The threshold, not a fixed grid, determines final resolution.
-
-        For integer params: snap the step to an even integer that divides
-        the range into roughly equal segments. Never produce non-integer
-        levels or uneven spacing on the integer lattice.
-        """
-        param_range = upper - lower
-        if param_range <= 0:
-            return param_range
-
-        # Start coarse: 4 segments across the range.
-        n_initial = 4
-        step = param_range / n_initial
-
-        if is_int:
-            # Snap to integer step that gives ~n_initial even segments.
-            # Range 0-100 → raw 25.0 → int step 25 → levels 0,25,50,75,100.
-            # Range 0-10  → raw 2.5  → int step 3  → levels 0,3,6,9 (close enough).
-            # Range 0-3   → raw 0.75 → int step 1  → levels 0,1,2,3 (all values).
-            int_step = max(1, round(step))
-            step = float(int_step)
-
-        logger.info(
-            f"DERIVED STEP: range=[{lower}, {upper}] "
-            f"threshold={self.convergence_threshold} "
-            f"initial_step={step:.1f} is_int={is_int}"
-        )
-        return step
-
-    def _build_probe_schedule(self):
-        """Build the initial probe schedule — coarse coverage pass.
-
-        For each param, probe at a few coarse levels with all others at
-        neutral. This is the coverage guard — ensures every param is
-        probed. The step size is derived from convergence_threshold.
-
-        After this pass, the ResponseCurve's convergence mechanism
-        takes over: where the curve moved more than the threshold,
-        insert substeps. The schedule is NOT a fixed grid — it's the
-        starting point for adaptive refinement.
-        """
         neutral = self._get_neutral_params()
         if not neutral:
             return
@@ -845,7 +705,7 @@ class ProbeCoordinator:
         if not upper_bounds:
             return
 
-        self._probe_schedule = []
+        self._param_order = []
         for param_idx, ub in enumerate(upper_bounds):
             name = ub['name']
             lower = ub.get('lower', 0.0)
@@ -853,32 +713,231 @@ class ProbeCoordinator:
             is_int = ub.get('is_int', False)
             step = self._derive_initial_step(lower, upper, is_int=is_int)
 
-            v = lower
-            while v <= upper + 1e-9:
-                level = round(v, 6)
-                if is_int:
-                    level = int(level)
+            self._param_bounds[name] = {
+                'lower': lower, 'upper': upper,
+                'is_int': is_int, 'idx': param_idx,
+            }
+            self._char_steps[name] = step
+            self._refinement_level[name] = 0
+            self._param_order.append(name)
 
-                config = dict(neutral)
-                if isinstance(config.get(name), list):
-                    config[name] = [level] * len(config[name])
-                else:
-                    config[name] = level
+            self._char_studies[name] = optuna.create_study(
+                direction='maximize',
+                sampler=optuna.samplers.TPESampler(n_startup_trials=3),
+                storage=optuna.storages.InMemoryStorage(),
+                study_name=f'char_{self.breeder_id}_{name}_r0',
+            )
 
-                self._probe_schedule.append({
-                    'param_name': name,
-                    'param_idx': param_idx,
-                    'level': level,
-                    'config': config,
-                })
-                v += step
+            logger.info(
+                f"CHAR STUDY: {name} step={step:.1f} "
+                f"range=[{lower}, {upper}]"
+            )
 
-        total = len(self._probe_schedule)
-        n_params = len(upper_bounds)
         logger.info(
-            f"PROBE SCHEDULE: {n_params} params, {total} initial probes "
-            f"(coarse pass, threshold={self.convergence_threshold})"
+            f"CHAR INIT: {len(self._param_order)} params, "
+            f"convergence_threshold={self.convergence_threshold}"
         )
+
+    def _select_next_param(self) -> Optional[str]:
+        """Coverage guard: cycle through non-converged params.
+
+        Round-robin ensures every param gets probed. Converged params
+        are skipped. The metaheuristic within each param's study handles
+        level selection — this only decides WHICH param's turn.
+        """
+        non_converged = [
+            p for p in self._param_order
+            if p not in self._converged_params
+        ]
+        if not non_converged:
+            return None
+
+        param = non_converged[self._param_cycle_idx % len(non_converged)]
+        self._param_cycle_idx += 1
+        logger.info(
+            f"COVERAGE: selected {param} "
+            f"({len(non_converged)} non-converged, cycle={self._param_cycle_idx})"
+        )
+        return param
+
+    def _ask_next_probe(self) -> Optional[Dict[str, Any]]:
+        """Ask the characterization study for the next stepped level."""
+        param_name = self._select_next_param()
+        if param_name is None:
+            return None
+
+        study = self._char_studies.get(param_name)
+        if study is None:
+            return None
+
+        bounds = self._param_bounds[param_name]
+        char_trial = study.ask()
+        level = char_trial.suggest_float(
+            param_name, bounds['lower'], bounds['upper'],
+            step=self._char_steps[param_name],
+        )
+
+        if bounds.get('is_int'):
+            level = float(int(round(level)))
+
+        self._char_trials[param_name] = char_trial
+
+        neutral = self._get_neutral_params()
+        config = dict(neutral)
+        if isinstance(config.get(param_name), list):
+            config[param_name] = [level] * len(config[param_name])
+        else:
+            config[param_name] = level
+
+        return {
+            'param_name': param_name,
+            'param_idx': bounds['idx'],
+            'level': level,
+            'config': config,
+        }
+
+    def _tell_char_study(self, param_name: str, delta: Optional[float]):
+        """Tell the characterization study the convergence delta.
+
+        After telling, check if the study exhausted its discrete levels
+        without convergence — if so, refine (new study at halved step).
+        """
+        from optuna.trial import TrialState
+
+        char_trial = self._char_trials.pop(param_name, None)
+        if char_trial is None:
+            return
+
+        study = self._char_studies.get(param_name)
+        if study is None:
+            return
+
+        if delta is not None:
+            study.tell(char_trial.number, float(delta))
+            logger.info(
+                f"CHAR TELL: {param_name} trial={char_trial.number} "
+                f"delta={delta:.6f}"
+            )
+        else:
+            study.tell(char_trial.number, state=TrialState.FAIL)
+            logger.info(
+                f"CHAR TELL: {param_name} trial={char_trial.number} FAIL"
+            )
+            return
+
+        if param_name not in self._converged_params:
+            n_levels = self._count_discrete_levels(param_name)
+            n_complete = sum(
+                1 for t in study.trials
+                if t.state == TrialState.COMPLETE
+            )
+            logger.info(
+                f"CHAR PROGRESS: {param_name} "
+                f"{n_complete}/{n_levels} levels visited"
+            )
+            if n_complete >= n_levels:
+                logger.info(
+                    f"CHAR EXHAUSTED: {param_name} "
+                    f"{n_complete}/{n_levels} levels → refining"
+                )
+                self._refine_study(param_name)
+
+    def _count_discrete_levels(self, param_name: str) -> int:
+        """Number of discrete levels at current step."""
+        bounds = self._param_bounds.get(param_name)
+        if not bounds:
+            return 0
+        step = self._char_steps.get(param_name, 1.0)
+        if step <= 0:
+            return 0
+        return int(round((bounds['upper'] - bounds['lower']) / step)) + 1
+
+    def _refine_study(self, param_name: str):
+        """Close current study, create new one at halved step.
+
+        Optuna drops params with inconsistent distributions when step
+        changes mid-study. Disposable studies are the workaround.
+        Curves persist in causal's CurveRegistry.
+        """
+        import optuna
+
+        level = self._refinement_level.get(param_name, 0)
+        if level >= self.refinement_depth:
+            logger.info(
+                f"REFINEMENT: {param_name} exhausted "
+                f"(depth={self.refinement_depth}) — accepting best effort"
+            )
+            self._converged_params.add(param_name)
+            return
+
+        old_step = self._char_steps[param_name]
+        new_step = old_step / 2.0
+        bounds = self._param_bounds[param_name]
+        if bounds.get('is_int'):
+            new_step = max(1.0, float(round(new_step)))
+
+        self._char_steps[param_name] = new_step
+        self._refinement_level[param_name] = level + 1
+
+        self._char_studies[param_name] = optuna.create_study(
+            direction='maximize',
+            sampler=optuna.samplers.TPESampler(n_startup_trials=3),
+            storage=optuna.storages.InMemoryStorage(),
+            study_name=f'char_{self.breeder_id}_{param_name}_r{level + 1}',
+        )
+
+        logger.info(
+            f"REFINEMENT: {param_name} study r{level}→r{level + 1} "
+            f"step={old_step:.2f}→{new_step:.2f}"
+        )
+
+    # ─── Step Derivation ─────────────────────────────────────────────
+
+    def _derive_initial_step(self, lower: float, upper: float,
+                             is_int: bool = False) -> float:
+        """Derive initial step size for stepped trial sampling.
+
+        Starts coarse (range / 4) to keep the initial probe count small.
+        The metaheuristic sampler within the characterization study
+        picks which levels to visit; refinement halves the step where
+        the curve is still moving.
+
+        For integer params: snap to an integer step that divides the
+        range into even segments and reaches the upper bound. We try
+        divisors of the range starting from the raw /4 estimate down
+        to 1, picking the largest that divides cleanly.
+        """
+        param_range = upper - lower
+        if param_range <= 0:
+            return param_range
+
+        # Start coarse: 4 segments across the range.
+        step = param_range / 4.0
+
+        if is_int:
+            # Snap to integer step that divides range evenly.
+            # Search outward from the ideal /4 estimate to find
+            # the closest divisor that reaches the upper bound.
+            int_range = int(round(param_range))
+            raw = max(1, int(round(step)))
+            best = None
+            for delta in range(0, max(raw, int_range)):
+                for candidate in (raw - delta, raw + delta):
+                    if candidate < 1:
+                        continue
+                    if int_range % candidate == 0:
+                        if best is None or abs(candidate - raw) < abs(best - raw):
+                            best = candidate
+                if best is not None and delta > 0:
+                    break  # found closest, no need to search further
+            step = float(best) if best else 1.0
+
+        logger.info(
+            f"DERIVED STEP: range=[{lower}, {upper}] "
+            f"threshold={self.convergence_threshold} "
+            f"initial_step={step:.1f} is_int={is_int}"
+        )
+        return step
 
     # ─── Main State Machine ──────────────────────────────────────────
 
@@ -925,18 +984,17 @@ class ProbeCoordinator:
         if self._count_active_breeders() < 2:
             return self._optimize_result()
 
-        # Build schedule on first entry
-        if not self._probe_schedule:
-            self._build_probe_schedule()
-            if not self._probe_schedule:
+        # Initialize characterization studies on first entry
+        if not self._char_studies:
+            self._init_characterization()
+            if not self._char_studies:
                 return self._optimize_result()
 
         # Try to become sender
         if self._try_acquire_lease(self.PROBE_PUSH):
-            logger.info("Acquired lease — starting probe schedule")
+            logger.info("Acquired lease — starting characterization")
             self.state = self.PROBE_PUSH
             self._push_count = 0
-            self._probe_idx = 0
             self._neutral_params = None  # force recompute
             return self._handle_probe_push(trial)
 
@@ -954,19 +1012,19 @@ class ProbeCoordinator:
     # ── PROBE_PUSH (sender) ──────────────────────────────────────────
 
     def _handle_probe_push(self, trial) -> Dict[str, Any]:
-        if self._probe_idx >= len(self._probe_schedule):
-            self.state = self.DONE
-            return self._handle_done(trial)
-
-        probe = self._probe_schedule[self._probe_idx]
-
+        # First trial of a new push block: ask char study for next level
         if self._push_count == 0:
+            probe = self._ask_next_probe()
+            if probe is None:
+                self.state = self.DONE
+                return self._handle_done(trial)
+            self._current_probe = probe
+
             self._set_lease_phase(self.PROBE_PUSH, push_budget=self.push_block_size)
             self._round_push_start = datetime.now()
             logger.info(
                 f"PROBE_PUSH: param={probe['param_name']} "
-                f"level={probe['level']} "
-                f"({self._probe_idx + 1}/{len(self._probe_schedule)})"
+                f"level={probe['level']}"
             )
         else:
             self._decrement_budget(self.PROBE_PUSH, is_push=True)
@@ -976,6 +1034,7 @@ class ProbeCoordinator:
             self.state = self.PROBE_PAUSE
             self._pause_count = 0
 
+        probe = self._current_probe
         return {
             'mode': 'impulse',
             'params': dict(probe['config']),
@@ -989,7 +1048,7 @@ class ProbeCoordinator:
     # ── PROBE_PAUSE (sender) ─────────────────────────────────────────
 
     def _handle_probe_pause(self, trial) -> Dict[str, Any]:
-        probe = self._probe_schedule[self._probe_idx]
+        probe = self._current_probe
 
         if self._pause_count == 0:
             self._set_lease_phase(self.PROBE_PAUSE, pause_budget=self.pause_block_size)
@@ -1009,12 +1068,10 @@ class ProbeCoordinator:
                 f"level={probe['level']}"
             )
 
-            # Close the loop: ask causal for shift + convergence,
-            # generate refinement if param's coarse pass is incomplete.
-            self._process_probe_result(probe)
-            self._check_param_complete(probe['param_name'])
+            # Close the loop: causal computes delta, tell char study.
+            delta = self._process_probe_result(probe)
+            self._tell_char_study(probe['param_name'], delta)
 
-            self._probe_idx += 1
             self._push_count = 0
             self._pause_count = 0
             self.state = self.PROBE_PUSH
@@ -1036,12 +1093,11 @@ class ProbeCoordinator:
         self.state = self.COOLDOWN
         self._cooldown_count = 0
 
-        n_probed = self._probe_idx
-        n_total = len(self._probe_schedule)
         n_converged = len(self._converged_params)
+        n_total = len(self._param_order)
         logger.info(
-            f"DONE: released lease. Probed {n_probed}/{n_total}. "
-            f"Converged params: {n_converged}."
+            f"DONE: released lease. "
+            f"Converged {n_converged}/{n_total} params."
         )
         return {'mode': 'optimize', 'params': None, 'detection_trial': False}
 
@@ -1050,7 +1106,11 @@ class ProbeCoordinator:
     def _handle_cooldown(self, trial) -> Dict[str, Any]:
         self._cooldown_count += 1
         if self._cooldown_count >= self.cooldown_trials:
-            if self._probe_idx < len(self._probe_schedule):
+            non_converged = [
+                p for p in self._param_order
+                if p not in self._converged_params
+            ]
+            if non_converged:
                 logger.info("COOLDOWN: done — re-acquiring for more probes")
                 if self._try_acquire_lease(self.PROBE_PUSH):
                     self.state = self.PROBE_PUSH
@@ -1102,3 +1162,35 @@ class ProbeCoordinator:
 
     def get_state(self) -> str:
         return self.state
+
+    def get_char_status(self) -> Dict[str, Any]:
+        """Structured characterization status for trial attrs / dashboards.
+
+        Exposes study internals: which params converged, refinement
+        levels, trials completed per study, current step sizes.
+        """
+        from optuna.trial import TrialState
+
+        status = {}
+        for name in self._param_order:
+            study = self._char_studies.get(name)
+            if study is None:
+                continue
+            n_complete = sum(
+                1 for t in study.trials
+                if t.state == TrialState.COMPLETE
+            )
+            n_levels = self._count_discrete_levels(name)
+            status[name] = {
+                'converged': name in self._converged_params,
+                'refinement': self._refinement_level.get(name, 0),
+                'step': self._char_steps.get(name, 0),
+                'levels_visited': n_complete,
+                'levels_total': n_levels,
+            }
+        return {
+            'state': self.state,
+            'params': status,
+            'converged_count': len(self._converged_params),
+            'params_total': len(self._param_order),
+        }
