@@ -72,8 +72,25 @@ def _config(params=None, **overrides):
     return cfg
 
 
+def _ensure_real_optuna():
+    """Restore real optuna — multiple test files mock it in sys.modules."""
+    import importlib
+    for mod in ['optuna.samplers', 'optuna.trial', 'optuna.storages', 'optuna']:
+        if mod in sys.modules:
+            obj = sys.modules[mod]
+            if not hasattr(obj, '__name__') or obj.__name__ != 'optuna':
+                del sys.modules[mod]
+    if 'optuna' not in sys.modules or getattr(sys.modules.get('optuna'), '__name__', '') != 'optuna':
+        import optuna
+        sys.modules['optuna'] = optuna
+        sys.modules['optuna.storages'] = optuna.storages
+        sys.modules['optuna.trial'] = optuna.trial
+        sys.modules['optuna.samplers'] = optuna.samplers
+
+
 def _make_coordinator(config=None, params=None, **overrides):
     """Create a coordinator with mocked DB."""
+    _ensure_real_optuna()
     config = config or _config(params=params, **overrides)
     coord = ProbeCoordinator(
         breeder_id='test-sender-1',
@@ -114,7 +131,6 @@ def test_step_derivation_float():
     assert step == 25.0, f"Expected 25.0, got {step}"
     print(f"  step={step}")
     print("  PASS")
-    return True
 
 
 def test_step_derivation_int():
@@ -126,7 +142,6 @@ def test_step_derivation_int():
     assert step == 2.0, f"Expected 2.0, got {step}"
     print(f"  step={step}")
     print("  PASS")
-    return True
 
 
 def test_step_derivation_int_small_range():
@@ -137,7 +152,6 @@ def test_step_derivation_int_small_range():
     assert step == 1.0, f"Expected 1.0, got {step}"
     print(f"  step={step}")
     print("  PASS")
-    return True
 
 
 def test_step_derivation_degenerate():
@@ -148,7 +162,6 @@ def test_step_derivation_degenerate():
     assert step == 0.0, f"Expected 0.0, got {step}"
     print(f"  step={step}")
     print("  PASS")
-    return True
 
 
 # ─── Characterization Study Init ───────────────────────────────────
@@ -169,7 +182,6 @@ def test_char_init_basic():
 
     print(f"  {len(coord._char_studies)} studies, step=25.0")
     print("  PASS")
-    return True
 
 
 def test_char_init_int_param():
@@ -186,7 +198,6 @@ def test_char_init_int_param():
     assert step == 2.0, f"Expected int step 2.0, got {step}"
     print(f"  step={step}")
     print("  PASS")
-    return True
 
 
 def test_char_ask_returns_probe():
@@ -204,7 +215,6 @@ def test_char_ask_returns_probe():
 
     print(f"  param={probe['param_name']} level={probe['level']}")
     print("  PASS")
-    return True
 
 
 def test_char_ask_uses_neutral():
@@ -224,7 +234,6 @@ def test_char_ask_uses_neutral():
 
     print("  All configs correct")
     print("  PASS")
-    return True
 
 
 def test_char_ask_stepped_level():
@@ -248,7 +257,6 @@ def test_char_ask_stepped_level():
 
     print(f"  param_0 levels: {sorted(seen_levels)}")
     print("  PASS")
-    return True
 
 
 # ─── Characterization Study Tell ────────────────────────────────────
@@ -272,7 +280,6 @@ def test_char_tell_feeds_delta():
 
     print(f"  told delta=0.5, study has {len(completed)} complete trial")
     print("  PASS")
-    return True
 
 
 def test_char_tell_fail_on_none():
@@ -293,7 +300,6 @@ def test_char_tell_fail_on_none():
 
     print(f"  told None, study has {len(failed)} fail trial")
     print("  PASS")
-    return True
 
 
 # ─── Coverage Guard ────────────────────────────────────────────────
@@ -314,7 +320,6 @@ def test_coverage_guard_cycles():
 
     print(f"  cycle: {seen[:3]} → {seen[3:6]}")
     print("  PASS")
-    return True
 
 
 def test_coverage_guard_skips_converged():
@@ -336,7 +341,6 @@ def test_coverage_guard_skips_converged():
 
     print(f"  converged=param_0, selected from: {seen}")
     print("  PASS")
-    return True
 
 
 def test_coverage_guard_all_converged():
@@ -353,7 +357,6 @@ def test_coverage_guard_all_converged():
 
     print("  all converged → None")
     print("  PASS")
-    return True
 
 
 # ─── Refinement ────────────────────────────────────────────────────
@@ -378,7 +381,6 @@ def test_refinement_creates_new_study():
 
     print(f"  step {original_step}→{new_step}, new study created")
     print("  PASS")
-    return True
 
 
 def test_refinement_depth_cap():
@@ -398,7 +400,6 @@ def test_refinement_depth_cap():
 
     print(f"  depth=2, after 3 calls → converged")
     print("  PASS")
-    return True
 
 
 def test_count_discrete_levels():
@@ -412,7 +413,6 @@ def test_count_discrete_levels():
 
     print(f"  step=25, range 0-100 → {n} levels")
     print("  PASS")
-    return True
 
 
 # ─── Timeout Deskew ───────────────────────────────────────────────
@@ -425,7 +425,6 @@ def test_timeout_no_history():
     assert timeout == 2.0, f"Expected 2.0, got {timeout}"
     print(f"  timeout={timeout}")
     print("  PASS")
-    return True
 
 
 def test_timeout_scales_with_trial_duration():
@@ -452,7 +451,6 @@ def test_timeout_scales_with_trial_duration():
     print(f"  slow trials (45s) → timeout {90.0}s")
     print(f"  fast trials (1s) → timeout {2.0}s")
     print("  PASS")
-    return True
 
 
 def test_timeout_tightened_by_rtt():
@@ -479,7 +477,6 @@ def test_timeout_tightened_by_rtt():
     print(f"  fast causal (3ms) → timeout 2.0s (floor)")
     print(f"  moderate causal (500ms) → timeout 5.0s")
     print("  PASS")
-    return True
 
 
 def test_timeout_never_below_floor():
@@ -495,35 +492,40 @@ def test_timeout_never_below_floor():
     assert timeout >= 2.0, f"Should never go below 2.0, got {timeout}"
     print(f"  timeout={timeout}")
     print("  PASS")
-    return True
 
 
 if __name__ == '__main__':
-    results = []
-    results.append(test_step_derivation_float())
-    results.append(test_step_derivation_int())
-    results.append(test_step_derivation_int_small_range())
-    results.append(test_step_derivation_degenerate())
-    results.append(test_char_init_basic())
-    results.append(test_char_init_int_param())
-    results.append(test_char_ask_returns_probe())
-    results.append(test_char_ask_uses_neutral())
-    results.append(test_char_ask_stepped_level())
-    results.append(test_char_tell_feeds_delta())
-    results.append(test_char_tell_fail_on_none())
-    results.append(test_coverage_guard_cycles())
-    results.append(test_coverage_guard_skips_converged())
-    results.append(test_coverage_guard_all_converged())
-    results.append(test_refinement_creates_new_study())
-    results.append(test_refinement_depth_cap())
-    results.append(test_count_discrete_levels())
-    results.append(test_timeout_no_history())
-    results.append(test_timeout_scales_with_trial_duration())
-    results.append(test_timeout_tightened_by_rtt())
-    results.append(test_timeout_never_below_floor())
-
-    passed = sum(results)
-    total = len(results)
+    test_fns = [
+        test_step_derivation_float,
+        test_step_derivation_int,
+        test_step_derivation_int_small_range,
+        test_step_derivation_degenerate,
+        test_char_init_basic,
+        test_char_init_int_param,
+        test_char_ask_returns_probe,
+        test_char_ask_uses_neutral,
+        test_char_ask_stepped_level,
+        test_char_tell_feeds_delta,
+        test_char_tell_fail_on_none,
+        test_coverage_guard_cycles,
+        test_coverage_guard_skips_converged,
+        test_coverage_guard_all_converged,
+        test_refinement_creates_new_study,
+        test_refinement_depth_cap,
+        test_count_discrete_levels,
+        test_timeout_no_history,
+        test_timeout_scales_with_trial_duration,
+        test_timeout_tightened_by_rtt,
+        test_timeout_never_below_floor,
+    ]
+    passed = 0
+    for fn in test_fns:
+        try:
+            fn()
+            passed += 1
+        except Exception as e:
+            print(f"  FAILED: {fn.__name__}: {e}")
+    total = len(test_fns)
     print(f"\n{'='*50}")
     print(f"Results: {passed}/{total} passed")
     if passed < total:
