@@ -13,17 +13,22 @@ No separate detection phase. No extremistic top-3 push. Detection and
 characterization are the same process at different completeness.
 
 PROBE STRATEGY (what gets pushed):
-  Metaheuristic-driven stepped trial selection. One Optuna study per
-  param. The sampler picks levels adaptively via suggest_float(step=S),
-  guided by convergence delta from causal. Direction is maximize — the
-  sampler seeks informative regions (high delta = surface still moving).
+  ONE Optuna study with all params as dimensions. Each trial samples
+  a categorical (which param to push) and a stepped float (at what
+  level). TPE picks both — no coverage guard, no round-robin. The
+  sampler's startup randomness IS the coverage pass.
 
-  Coverage guard: round-robin through non-converged params. The
-  metaheuristic handles level selection WITHIN each param.
+  Direction is maximize — high delta means the interpolated surface
+  is still moving (informative region). TPE concentrates sampling
+  where delta is high and ignores dead params.
 
   Disposable studies for refinement: can't change step mid-study, so
   close and create new at halved step. Curves persist in causal's
   CurveRegistry across studies.
+
+  INFINITY catching: causal returns f64::MAX/2 for the first point
+  on each curve (no prior to compare). Coordinator catches this and
+  replaces with 1.0 before telling the study.
 
   One trial, dual feed: the physical measurement feeds both the
   optimization study (objective values, immediate tell) and the
@@ -144,17 +149,17 @@ class ProbeCoordinator:
         self._cooldown_count = 0
         self._hold_count = 0
 
-        # Characterization studies — one per param, disposable per refinement level.
-        # The metaheuristic sampler picks stepped levels adaptively. Studies are
-        # short-lived: close on convergence or exhaustion, create new at halved
-        # step for refinement. Curves persist in causal's CurveRegistry.
-        self._char_studies: Dict[str, Any] = {}  # optuna.Study per param
-        self._char_steps: Dict[str, float] = {}   # current step per param
-        self._char_trials: Dict[str, Any] = {}    # in-flight trial per param
-        self._refinement_level: Dict[str, int] = {}  # refinement depth per param
-        self._param_order: List[str] = []
+        # Characterization — ONE study with all params as dimensions.
+        # TPE picks both which param to push and at what level, guided
+        # by delta from causal. Disposable per refinement level: close
+        # on convergence/exhaustion, create new at halved step.
+        # Curves persist in causal's CurveRegistry across studies.
+        self._char_study: Any = None  # single optuna.Study
+        self._char_trial: Any = None  # in-flight trial
+        self._char_step: float = 0.0
+        self._refinement_level = 0
+        self._param_names: List[str] = []
         self._param_bounds: Dict[str, Dict] = {}  # name → {lower, upper, is_int, idx}
-        self._param_cycle_idx = 0
         self._current_probe: Optional[Dict[str, Any]] = None
 
         # Neutral params (cached)
@@ -686,15 +691,16 @@ class ProbeCoordinator:
 
         return delta
 
-    # ─── Characterization Studies ────────────────────────────────────
+    # ─── Characterization Study ─────────────────────────────────────
 
     def _init_characterization(self):
-        """Create characterization studies for all probe params.
+        """Create ONE characterization study with all params as dimensions.
 
-        One Optuna study per param. The sampler picks stepped levels
-        adaptively, guided by delta from causal. Direction is maximize:
-        the sampler seeks informative regions (high delta = surface
-        still moving). Halting comes from causal's convergence check.
+        Each trial samples a categorical (which param to push) and a
+        float (at what level). TPE learns across both: which params
+        produce high delta (informative) and which levels within those
+        params are worth probing. No coverage guard — the sampler's
+        startup randomness IS the coverage pass.
         """
         import optuna
 
@@ -706,82 +712,66 @@ class ProbeCoordinator:
         if not upper_bounds:
             return
 
-        self._param_order = []
+        self._param_names = []
+        global_low = float('inf')
+        global_high = float('-inf')
         for param_idx, ub in enumerate(upper_bounds):
             name = ub['name']
             lower = ub.get('lower', 0.0)
             upper = ub.get('upper', 100.0)
             is_int = ub.get('is_int', False)
-            step = self._derive_initial_step(lower, upper, is_int=is_int)
-
             self._param_bounds[name] = {
                 'lower': lower, 'upper': upper,
                 'is_int': is_int, 'idx': param_idx,
             }
-            self._char_steps[name] = step
-            self._refinement_level[name] = 0
-            self._param_order.append(name)
+            self._param_names.append(name)
+            global_low = min(global_low, lower)
+            global_high = max(global_high, upper)
 
-            self._char_studies[name] = optuna.create_study(
-                direction='maximize',
-                sampler=optuna.samplers.TPESampler(n_startup_trials=3),
-                storage=optuna.storages.InMemoryStorage(),
-                study_name=f'char_{self.breeder_id}_{name}_r0',
-            )
+        # Single step for all params — derived from the widest range.
+        step = self._derive_initial_step(global_low, global_high)
+        self._char_step = step
 
-            logger.info(
-                f"CHAR STUDY: {name} step={step:.1f} "
-                f"range=[{lower}, {upper}]"
-            )
+        # n_startup_trials = number of params × levels per param.
+        # This ensures random exploration covers all params before
+        # TPE takes over. TPE's startup IS the coverage pass.
+        n_params = len(self._param_names)
+        n_startup = max(5, n_params * 3)
 
-        logger.info(
-            f"CHAR INIT: {len(self._param_order)} params, "
-            f"convergence_threshold={self.convergence_threshold}"
+        self._char_study = optuna.create_study(
+            direction='maximize',
+            sampler=optuna.samplers.TPESampler(n_startup_trials=n_startup),
+            storage=optuna.storages.InMemoryStorage(),
+            study_name=f'char_{self.breeder_id}_r0',
         )
 
-    def _select_next_param(self) -> Optional[str]:
-        """Coverage guard: cycle through non-converged params.
-
-        Round-robin ensures every param gets probed. Converged params
-        are skipped. The metaheuristic within each param's study handles
-        level selection — this only decides WHICH param's turn.
-        """
-        non_converged = [
-            p for p in self._param_order
-            if p not in self._converged_params
-        ]
-        if not non_converged:
-            return None
-
-        param = non_converged[self._param_cycle_idx % len(non_converged)]
-        self._param_cycle_idx += 1
         logger.info(
-            f"COVERAGE: selected {param} "
-            f"({len(non_converged)} non-converged, cycle={self._param_cycle_idx})"
+            f"CHAR INIT: {n_params} params, step={step:.1f}, "
+            f"startup={n_startup}, threshold={self.convergence_threshold}"
         )
-        return param
 
     def _ask_next_probe(self) -> Optional[Dict[str, Any]]:
-        """Ask the characterization study for the next stepped level."""
-        param_name = self._select_next_param()
-        if param_name is None:
+        """Ask the study for the next param + level to push.
+
+        One trial samples which param (categorical) and what level
+        (stepped float). The coordinator builds a push config from
+        that — one param at the sampled level, rest at neutral.
+        """
+        if self._char_study is None:
             return None
 
-        study = self._char_studies.get(param_name)
-        if study is None:
-            return None
-
+        trial = self._char_study.ask()
+        param_name = trial.suggest_categorical('push_param', self._param_names)
         bounds = self._param_bounds[param_name]
-        char_trial = study.ask()
-        level = char_trial.suggest_float(
-            param_name, bounds['lower'], bounds['upper'],
-            step=self._char_steps[param_name],
-        )
 
+        level = trial.suggest_float(
+            'push_level', bounds['lower'], bounds['upper'],
+            step=self._char_step,
+        )
         if bounds.get('is_int'):
             level = float(int(round(level)))
 
-        self._char_trials[param_name] = char_trial
+        self._char_trial = trial
 
         neutral = self._get_neutral_params()
         config = dict(neutral)
@@ -798,62 +788,78 @@ class ProbeCoordinator:
         }
 
     def _tell_char_study(self, param_name: str, delta: Optional[float]):
-        """Tell the characterization study the convergence delta.
+        """Tell the study the convergence delta for the last probe.
 
-        After telling, check if the study exhausted its discrete levels
+        Catches INFINITY (first point on a curve, no prior to compare)
+        and replaces it with 1.0 — "maximally informative but not
+        astronomically so." Prevents TPE from being poisoned by
+        8.99e+307 values.
+
+        After telling, checks if all discrete combinations are exhausted
         without convergence — if so, refine (new study at halved step).
         """
         from optuna.trial import TrialState
 
-        char_trial = self._char_trials.pop(param_name, None)
-        if char_trial is None:
+        if self._char_trial is None:
             return
 
-        study = self._char_studies.get(param_name)
-        if study is None:
+        trial = self._char_trial
+        self._char_trial = None
+
+        if delta is None:
+            self._char_study.tell(trial.number, state=TrialState.FAIL)
+            logger.info(f"CHAR TELL: trial={trial.number} FAIL (causal unavailable)")
             return
 
-        if delta is not None:
-            study.tell(char_trial.number, float(delta))
+        # Catch INFINITY-replacement from causal (f64::MAX/2 ≈ 8.99e+307)
+        # and absurd values. Replace with 1.0 — informative enough for
+        # TPE to want to revisit, but not so large it dominates.
+        if delta > 1e10:
             logger.info(
-                f"CHAR TELL: {param_name} trial={char_trial.number} "
-                f"delta={delta:.6f}"
+                f"CHAR TELL: catching INFINITY delta={delta:.2e} "
+                f"→ replacing with 1.0 (first point, no prior)"
             )
-        else:
-            study.tell(char_trial.number, state=TrialState.FAIL)
-            logger.info(
-                f"CHAR TELL: {param_name} trial={char_trial.number} FAIL"
-            )
-            return
+            delta = 1.0
 
-        if param_name not in self._converged_params:
-            n_levels = self._count_discrete_levels(param_name)
+        self._char_study.tell(trial.number, float(delta))
+        logger.info(
+            f"CHAR TELL: {param_name} level trial={trial.number} "
+            f"delta={delta:.6f}"
+        )
+
+        # Check exhaustion: all (param × level) combinations visited?
+        if len(self._converged_params) < len(self._param_names):
             n_complete = sum(
-                1 for t in study.trials
+                1 for t in self._char_study.trials
                 if t.state == TrialState.COMPLETE
             )
-            logger.info(
-                f"CHAR PROGRESS: {param_name} "
-                f"{n_complete}/{n_levels} levels visited"
+            # Total discrete space = sum of levels across all params
+            total_space = sum(
+                self._count_param_levels(name)
+                for name in self._param_names
             )
-            if n_complete >= n_levels:
+            logger.info(
+                f"CHAR PROGRESS: {n_complete}/{total_space} "
+                f"combinations explored, "
+                f"{len(self._converged_params)}/{len(self._param_names)} "
+                f"params converged"
+            )
+            if n_complete >= total_space:
                 logger.info(
-                    f"CHAR EXHAUSTED: {param_name} "
-                    f"{n_complete}/{n_levels} levels → refining"
+                    f"CHAR EXHAUSTED: {n_complete}/{total_space} → refining"
                 )
-                self._refine_study(param_name)
+                self._refine_study()
 
-    def _count_discrete_levels(self, param_name: str) -> int:
-        """Number of discrete levels at current step."""
+    def _count_param_levels(self, param_name: str) -> int:
+        """Number of discrete levels for a param at current step."""
         bounds = self._param_bounds.get(param_name)
         if not bounds:
             return 0
-        step = self._char_steps.get(param_name, 1.0)
-        if step <= 0:
+        if self._char_step <= 0:
             return 0
-        return int(round((bounds['upper'] - bounds['lower']) / step)) + 1
+        return int(round((bounds['upper'] - bounds['lower']) / self._char_step)) + 1
 
-    def _refine_study(self, param_name: str):
+    def _refine_study(self):
         """Close current study, create new one at halved step.
 
         Optuna drops params with inconsistent distributions when step
@@ -862,34 +868,32 @@ class ProbeCoordinator:
         """
         import optuna
 
-        level = self._refinement_level.get(param_name, 0)
-        if level >= self.refinement_depth:
+        if self._refinement_level >= self.refinement_depth:
             logger.info(
-                f"REFINEMENT: {param_name} exhausted "
-                f"(depth={self.refinement_depth}) — accepting best effort"
+                f"REFINEMENT: exhausted (depth={self.refinement_depth}) "
+                f"— accepting best effort"
             )
-            self._converged_params.add(param_name)
+            self._converged_params.update(self._param_names)
             return
 
-        old_step = self._char_steps[param_name]
+        old_step = self._char_step
         new_step = old_step / 2.0
-        bounds = self._param_bounds[param_name]
-        if bounds.get('is_int'):
-            new_step = max(1.0, float(round(new_step)))
+        self._char_step = new_step
+        self._refinement_level += 1
 
-        self._char_steps[param_name] = new_step
-        self._refinement_level[param_name] = level + 1
+        n_params = len(self._param_names)
+        n_startup = max(5, n_params * 3)
 
-        self._char_studies[param_name] = optuna.create_study(
+        self._char_study = optuna.create_study(
             direction='maximize',
-            sampler=optuna.samplers.TPESampler(n_startup_trials=3),
+            sampler=optuna.samplers.TPESampler(n_startup_trials=n_startup),
             storage=optuna.storages.InMemoryStorage(),
-            study_name=f'char_{self.breeder_id}_{param_name}_r{level + 1}',
+            study_name=f'char_{self.breeder_id}_r{self._refinement_level}',
         )
 
         logger.info(
-            f"REFINEMENT: {param_name} study r{level}→r{level + 1} "
-            f"step={old_step:.2f}→{new_step:.2f}"
+            f"REFINEMENT: study r{self._refinement_level - 1}→"
+            f"r{self._refinement_level} step={old_step:.2f}→{new_step:.2f}"
         )
 
     # ─── Step Derivation ─────────────────────────────────────────────
@@ -985,10 +989,10 @@ class ProbeCoordinator:
         if self._count_active_breeders() < 2:
             return self._optimize_result()
 
-        # Initialize characterization studies on first entry
-        if not self._char_studies:
+        # Initialize characterization study on first entry
+        if self._char_study is None:
             self._init_characterization()
-            if not self._char_studies:
+            if self._char_study is None:
                 return self._optimize_result()
 
         # Try to become sender
@@ -1095,7 +1099,7 @@ class ProbeCoordinator:
         self._cooldown_count = 0
 
         n_converged = len(self._converged_params)
-        n_total = len(self._param_order)
+        n_total = len(self._param_names)
         logger.info(
             f"DONE: released lease. "
             f"Converged {n_converged}/{n_total} params."
@@ -1108,7 +1112,7 @@ class ProbeCoordinator:
         self._cooldown_count += 1
         if self._cooldown_count >= self.cooldown_trials:
             non_converged = [
-                p for p in self._param_order
+                p for p in self._param_names
                 if p not in self._converged_params
             ]
             if non_converged:
@@ -1173,25 +1177,33 @@ class ProbeCoordinator:
         from optuna.trial import TrialState
 
         status = {}
-        for name in self._param_order:
-            study = self._char_studies.get(name)
-            if study is None:
-                continue
+        if self._char_study is not None:
+            for name in self._param_names:
+                n_levels = self._count_param_levels(name)
+                status[name] = {
+                    'converged': name in self._converged_params,
+                    'step': self._char_step,
+                    'levels_total': n_levels,
+                }
+
             n_complete = sum(
-                1 for t in study.trials
+                1 for t in self._char_study.trials
                 if t.state == TrialState.COMPLETE
             )
-            n_levels = self._count_discrete_levels(name)
-            status[name] = {
-                'converged': name in self._converged_params,
-                'refinement': self._refinement_level.get(name, 0),
-                'step': self._char_steps.get(name, 0),
-                'levels_visited': n_complete,
-                'levels_total': n_levels,
-            }
+            total_space = sum(
+                self._count_param_levels(n) for n in self._param_names
+            )
+        else:
+            n_complete = 0
+            total_space = 0
+
         return {
             'state': self.state,
+            'refinement_level': self._refinement_level,
+            'step': self._char_step,
             'params': status,
+            'combinations_explored': n_complete,
+            'combinations_total': total_space,
             'converged_count': len(self._converged_params),
-            'params_total': len(self._param_order),
+            'params_total': len(self._param_names),
         }
