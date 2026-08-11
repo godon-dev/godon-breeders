@@ -1012,6 +1012,8 @@ class BreederWorker:
                     # Tag trial for observer
                     trial.set_user_attr('detection_mode', detection_mode)
                     trial.set_user_attr('coord_state', self._probe_coordinator.get_state())
+                    if hasattr(self._probe_coordinator, 'get_char_status'):
+                        trial.set_user_attr('char_status', self._probe_coordinator.get_char_status())
                     if decision.get('impulse_phase'):
                         trial.set_user_attr('impulse_phase', decision['impulse_phase'])
                     if decision.get('impulse_scale') is not None:
