@@ -494,6 +494,215 @@ def test_timeout_never_below_floor():
     print("  PASS")
 
 
+# ─── State Machine Integration ────────────────────────────────────
+
+class _FakeTrial:
+    """Minimal trial stand-in for decide_trial()."""
+    def __init__(self, number=0):
+        self.number = number
+        self._attrs = {}
+    def set_user_attr(self, key, value):
+        self._attrs[key] = value
+    @property
+    def user_attrs(self):
+        return self._attrs
+
+
+def test_push_pause_round():
+    """Full push/pause round: ask → push N → pause N → tell delta."""
+    print("\n=== test_push_pause_round ===")
+    from unittest.mock import patch
+    coord = _make_coordinator()
+    coord._init_characterization()
+
+    # Patch causal to return a delta
+    with patch.object(coord, '_query_causal_probe_result',
+                      return_value={'shift': 0.05, 'delta': 0.03, 'converged': False}):
+        # Simulate acquiring lease and entering PROBE_PUSH
+        coord.state = coord.PROBE_PUSH
+        coord._push_count = 0
+
+        # Push block (3 trials)
+        decisions = []
+        for i in range(coord.push_block_size):
+            t = _FakeTrial(number=i)
+            d = coord._handle_probe_push(t)
+            decisions.append(d)
+
+        assert all(d['mode'] == 'impulse' for d in decisions)
+        assert decisions[0]['probe_param'] is not None
+        assert decisions[0]['probe_level'] is not None
+        assert coord.state == coord.PROBE_PAUSE
+
+        # Pause block (3 trials)
+        coord._pause_count = 0
+        pause_decisions = []
+        for i in range(coord.pause_block_size):
+            t = _FakeTrial(number=i + coord.push_block_size)
+            d = coord._handle_probe_pause(t)
+            pause_decisions.append(d)
+
+        assert all(d['mode'] == 'hold' for d in pause_decisions)
+
+        # After pause completes, should be back in PROBE_PUSH
+        assert coord.state == coord.PROBE_PUSH
+
+        # The char study should have 1 complete trial (delta told)
+        from optuna.trial import TrialState
+        param = decisions[0]['probe_param']
+        study = coord._char_studies[param]
+        complete = [t for t in study.trials if t.state == TrialState.COMPLETE]
+        assert len(complete) == 1
+        assert complete[0].values == [0.03]
+
+    print(f"  push={coord.push_block_size}, pause={coord.pause_block_size}")
+    print(f"  delta=0.03 told to study, 1 complete trial")
+    print("  PASS")
+
+
+def test_exhaustion_triggers_refinement():
+    """Visiting all discrete levels triggers refinement (new study at halved step)."""
+    print("\n=== test_exhaustion_triggers_refinement ===")
+    coord = _make_coordinator(params={
+        'param_0': {'constraints': [{'lower': 0.0, 'upper': 100.0}]},
+    })
+    coord._init_characterization()
+
+    original_step = coord._char_steps['param_0']
+    n_levels = coord._count_discrete_levels('param_0')
+
+    # Ask + tell all levels
+    for i in range(n_levels):
+        probe = coord._ask_next_probe()
+        assert probe is not None
+        coord._tell_char_study('param_0', delta=0.5)
+
+    # Should have triggered refinement
+    new_step = coord._char_steps['param_0']
+    assert new_step == original_step / 2.0, \
+        f"Expected step {original_step/2.0}, got {new_step}"
+    assert coord._refinement_level['param_0'] == 1
+
+    print(f"  {n_levels} levels exhausted → step {original_step}→{new_step}")
+    print("  PASS")
+
+
+def test_convergence_halts_param():
+    """Converged param is skipped by coverage guard and eventually returns None."""
+    print("\n=== test_convergence_halts_param ===")
+    coord = _make_coordinator(params={
+        'param_0': {'constraints': [{'lower': 0.0, 'upper': 100.0}]},
+    })
+    coord._init_characterization()
+
+    # Mark converged
+    coord._converged_params.add('param_0')
+
+    # Coverage guard should skip it
+    result = coord._select_next_param()
+    assert result is None, f"Only param is converged, expected None, got {result}"
+
+    # ask should also return None
+    probe = coord._ask_next_probe()
+    assert probe is None
+
+    print("  converged param → None from both guard and ask")
+    print("  PASS")
+
+
+def test_process_probe_result_returns_delta():
+    """_process_probe_result returns delta from causal, not None."""
+    print("\n=== test_process_probe_result_returns_delta ===")
+    from unittest.mock import patch
+    coord = _make_coordinator()
+    coord._init_characterization()
+
+    probe = {'param_name': 'param_0', 'level': 50.0, 'param_idx': 0}
+
+    with patch.object(coord, '_query_causal_probe_result',
+                      return_value={'shift': 0.04, 'delta': 0.015, 'converged': False}):
+        delta = coord._process_probe_result(probe)
+        assert delta == 0.015, f"Expected 0.015, got {delta}"
+
+    # Causal unavailable → None
+    with patch.object(coord, '_query_causal_probe_result', return_value=None):
+        delta = coord._process_probe_result(probe)
+        assert delta is None
+
+    print("  causal available → delta=0.015")
+    print("  causal unavailable → None")
+    print("  PASS")
+
+
+def test_process_probe_result_marks_converged():
+    """When causal says converged=True, param is added to converged set."""
+    print("\n=== test_process_probe_result_marks_converged ===")
+    from unittest.mock import patch
+    coord = _make_coordinator()
+    coord._init_characterization()
+
+    probe = {'param_name': 'param_1', 'level': 75.0, 'param_idx': 1}
+    assert 'param_1' not in coord._converged_params
+
+    with patch.object(coord, '_query_causal_probe_result',
+                      return_value={'shift': 0.001, 'delta': 0.005, 'converged': True}):
+        coord._process_probe_result(probe)
+
+    assert 'param_1' in coord._converged_params
+
+    print("  converged=True → param_1 in converged set")
+    print("  PASS")
+
+
+def test_get_char_status():
+    """get_char_status returns structured per-param state."""
+    print("\n=== test_get_char_status ===")
+    coord = _make_coordinator()
+    coord._init_characterization()
+
+    # Do one probe to have some state
+    probe = coord._ask_next_probe()
+    coord._tell_char_study(probe['param_name'], delta=0.5)
+
+    status = coord.get_char_status()
+
+    assert status['state'] == coord.state
+    assert status['converged_count'] == 0
+    assert status['params_total'] == 3
+
+    for name in coord._param_order:
+        s = status['params'][name]
+        assert 'converged' in s
+        assert 'refinement' in s
+        assert 'step' in s
+        assert 'levels_visited' in s
+        assert 'levels_total' in s
+
+    # The probed param should have 1 visited level
+    probed = status['params'][probe['param_name']]
+    assert probed['levels_visited'] == 1
+
+    print(f"  {status['converged_count']}/{status['params_total']} converged")
+    print(f"  {probe['param_name']}: {probed}")
+    print("  PASS")
+
+
+def test_ask_after_all_converged_returns_none():
+    """When all params converged, _ask_next_probe returns None → signals DONE."""
+    print("\n=== test_ask_after_all_converged_returns_none ===")
+    coord = _make_coordinator()
+    coord._init_characterization()
+
+    for p in coord._param_order:
+        coord._converged_params.add(p)
+
+    probe = coord._ask_next_probe()
+    assert probe is None
+
+    print("  all converged → None (triggers DONE)")
+    print("  PASS")
+
+
 if __name__ == '__main__':
     test_fns = [
         test_step_derivation_float,
@@ -517,6 +726,13 @@ if __name__ == '__main__':
         test_timeout_scales_with_trial_duration,
         test_timeout_tightened_by_rtt,
         test_timeout_never_below_floor,
+        test_push_pause_round,
+        test_exhaustion_triggers_refinement,
+        test_convergence_halts_param,
+        test_process_probe_result_returns_delta,
+        test_process_probe_result_marks_converged,
+        test_get_char_status,
+        test_ask_after_all_converged_returns_none,
     ]
     passed = 0
     for fn in test_fns:
