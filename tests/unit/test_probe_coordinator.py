@@ -213,7 +213,7 @@ def test_char_ask_samples_different_params():
         probe = coord._ask_next_probe()
         if probe:
             seen_params.add(probe['param_name'])
-            coord._tell_char_study(probe['param_name'], delta=0.5)
+            coord._tell_char_study(probe['param_name'], {'delta': 0.5})
 
     # With 3 params and n_startup=9, all 3 should appear
     assert len(seen_params) >= 2, f"Expected >=2 params, got {seen_params}"
@@ -229,7 +229,7 @@ def test_char_tell_feeds_delta():
     coord._init_characterization()
 
     probe = coord._ask_next_probe()
-    coord._tell_char_study(probe['param_name'], delta=0.5)
+    coord._tell_char_study(probe['param_name'], {'delta': 0.5})
 
     from optuna.trial import TrialState
     complete = [t for t in coord._char_study.trials if t.state == TrialState.COMPLETE]
@@ -247,8 +247,8 @@ def test_char_tell_catches_infinity():
     coord._init_characterization()
 
     probe = coord._ask_next_probe()
-    # Simulate causal's INFINITY replacement (f64::MAX/2)
-    coord._tell_char_study(probe['param_name'], delta=8.988e+307)
+    # Simulate causal's INFINITY replacement (f64::MAX/2), old-causal shape
+    coord._tell_char_study(probe['param_name'], {'delta': 8.988e+307})
 
     from optuna.trial import TrialState
     complete = [t for t in coord._char_study.trials if t.state == TrialState.COMPLETE]
@@ -267,13 +267,62 @@ def test_char_tell_fail_on_none():
     coord._init_characterization()
 
     probe = coord._ask_next_probe()
-    coord._tell_char_study(probe['param_name'], delta=None)
+    coord._tell_char_study(probe['param_name'], None)
 
     from optuna.trial import TrialState
     failed = [t for t in coord._char_study.trials if t.state == TrialState.FAIL]
     assert len(failed) == 1
 
     print(f"  told None → 1 FAIL trial")
+    print("  PASS")
+
+
+def test_char_tell_prefers_z():
+    """When causal returns z, the study is told z — not delta."""
+    print("\n=== test_char_tell_prefers_z ===")
+    coord = _make_coordinator()
+    coord._init_characterization()
+
+    probe = coord._ask_next_probe()
+    coord._tell_char_study(probe['param_name'], {
+        'shift': 0.37, 'shift_bar': 0.012, 'z': 8.3,
+        'drift': False, 'delta': 0.04, 'converged': False,
+    })
+
+    from optuna.trial import TrialState
+    complete = [t for t in coord._char_study.trials if t.state == TrialState.COMPLETE]
+    assert len(complete) == 1
+    assert complete[0].values == [8.3], \
+        f"Expected z=8.3 as objective, got {complete[0].values}"
+
+    print(f"  told z=8.3 → objective 8.3")
+    print("  PASS")
+
+
+def test_process_probe_result_returns_dict():
+    """_process_probe_result returns the causal result dict."""
+    print("\n=== test_process_probe_result_returns_dict ===")
+    from unittest.mock import patch
+    coord = _make_coordinator()
+    coord._init_characterization()
+
+    probe = {'param_name': 'param_0', 'level': 50.0, 'param_idx': 0}
+
+    with patch.object(coord, '_query_causal_probe_result',
+                      return_value={'shift': 0.04, 'shift_bar': 0.02, 'z': 1.5,
+                                    'drift': False, 'delta': 0.015, 'converged': False}):
+        result = coord._process_probe_result(probe)
+        assert isinstance(result, dict)
+        assert result['delta'] == 0.015
+        assert result['z'] == 1.5
+
+    # Causal unavailable → None
+    with patch.object(coord, '_query_causal_probe_result', return_value=None):
+        result = coord._process_probe_result(probe)
+        assert result is None
+
+    print("  causal available → result dict (z + delta)")
+    print("  causal unavailable → None")
     print("  PASS")
 
 
@@ -485,7 +534,7 @@ def test_exhaustion_triggers_refinement():
     for i in range(n_levels):
         probe = coord._ask_next_probe()
         assert probe is not None
-        coord._tell_char_study('param_0', delta=0.5)
+        coord._tell_char_study('param_0', {'delta': 0.5})
 
     # Should have triggered refinement
     assert coord._char_step == original_step / 2.0, \
@@ -519,30 +568,6 @@ def test_convergence_all_params_done():
     print("  PASS")
 
 
-def test_process_probe_result_returns_delta():
-    """_process_probe_result returns delta from causal, not None."""
-    print("\n=== test_process_probe_result_returns_delta ===")
-    from unittest.mock import patch
-    coord = _make_coordinator()
-    coord._init_characterization()
-
-    probe = {'param_name': 'param_0', 'level': 50.0, 'param_idx': 0}
-
-    with patch.object(coord, '_query_causal_probe_result',
-                      return_value={'shift': 0.04, 'delta': 0.015, 'converged': False}):
-        delta = coord._process_probe_result(probe)
-        assert delta == 0.015, f"Expected 0.015, got {delta}"
-
-    # Causal unavailable → None
-    with patch.object(coord, '_query_causal_probe_result', return_value=None):
-        delta = coord._process_probe_result(probe)
-        assert delta is None
-
-    print("  causal available → delta=0.015")
-    print("  causal unavailable → None")
-    print("  PASS")
-
-
 def test_process_probe_result_marks_converged():
     """When causal says converged=True, param is added to converged set."""
     print("\n=== test_process_probe_result_marks_converged ===")
@@ -571,7 +596,7 @@ def test_get_char_status():
 
     # Do one probe to have some state
     probe = coord._ask_next_probe()
-    coord._tell_char_study(probe['param_name'], delta=0.5)
+    coord._tell_char_study(probe['param_name'], {'delta': 0.5})
 
     status = coord.get_char_status()
 
@@ -637,7 +662,8 @@ if __name__ == '__main__':
         test_push_pause_round,
         test_exhaustion_triggers_refinement,
         test_convergence_all_params_done,
-        test_process_probe_result_returns_delta,
+        test_char_tell_prefers_z,
+        test_process_probe_result_returns_dict,
         test_process_probe_result_marks_converged,
         test_get_char_status,
         test_ask_after_all_converged,
