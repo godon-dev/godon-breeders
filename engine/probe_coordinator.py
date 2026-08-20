@@ -664,11 +664,13 @@ class ProbeCoordinator:
         )
         return shift
 
-    def _process_probe_result(self, probe: dict) -> Optional[float]:
+    def _process_probe_result(self, probe: dict) -> Optional[dict]:
         """Called when a probe round (push + pause) completes.
 
         Calls causal to compute shift, update ResponseCurve, check
-        convergence. Returns delta for the characterization study.
+        convergence. Returns the causal result dict:
+
+            {shift, shift_bar, z, drift, delta, converged, ...}
 
         Falls back gracefully: if causal is unreachable, returns None
         (coordinator continues blind, trial told as FAIL to char study).
@@ -681,7 +683,6 @@ class ProbeCoordinator:
             )
             return None
 
-        delta = result.get('delta')
         converged = result.get('converged', False)
         param_name = probe['param_name']
 
@@ -689,7 +690,7 @@ class ProbeCoordinator:
             logger.info(f"CONVERGED: {param_name}")
             self._converged_params.add(param_name)
 
-        return delta
+        return result
 
     # ─── Characterization Study ─────────────────────────────────────
 
@@ -787,16 +788,16 @@ class ProbeCoordinator:
             'config': config,
         }
 
-    def _tell_char_study(self, param_name: str, delta: Optional[float]):
-        """Tell the study the convergence delta for the last probe.
+    def _tell_char_study(self, param_name: str, result: Optional[dict]):
+        """Tell the characterization study the information score.
 
-        Catches INFINITY (first point on a curve, no prior to compare)
-        and replaces it with 1.0 — "maximally informative but not
-        astronomically so." Prevents TPE from being poisoned by
-        8.99e+307 values.
+        Objective = z (surprise ÷ its own measurement uncertainty) when
+        causal provides it — noise wiggles score ~1 and stop attracting
+        the sampler, real structure scores high. Falls back to the raw
+        delta objective (with INFINITY catch) against older causal.
 
-        After telling, checks if all discrete combinations are exhausted
-        without convergence — if so, refine (new study at halved step).
+        Convergence is NOT decided here: causal's converged flag drives
+        that; delta remains the surface-movement signal.
         """
         from optuna.trial import TrialState
 
@@ -806,26 +807,43 @@ class ProbeCoordinator:
         trial = self._char_trial
         self._char_trial = None
 
-        if delta is None:
+        if result is None:
             self._char_study.tell(trial.number, state=TrialState.FAIL)
             logger.info(f"CHAR TELL: trial={trial.number} FAIL (causal unavailable)")
             return
 
-        # Catch INFINITY-replacement from causal (f64::MAX/2 ≈ 8.99e+307)
-        # and absurd values. Replace with 1.0 — informative enough for
-        # TPE to want to revisit, but not so large it dominates.
-        if delta > 1e10:
-            logger.info(
-                f"CHAR TELL: catching INFINITY delta={delta:.2e} "
-                f"→ replacing with 1.0 (first point, no prior)"
-            )
-            delta = 1.0
+        z = result.get('z')
+        delta = result.get('delta')
 
-        self._char_study.tell(trial.number, float(delta))
-        logger.info(
-            f"CHAR TELL: {param_name} level trial={trial.number} "
-            f"delta={delta:.6f}"
-        )
+        if z is not None:
+            value = float(z)
+            logger.info(
+                f"CHAR TELL: {param_name} trial={trial.number} "
+                f"z={value:.3f} (delta={delta} "
+                f"drift={result.get('drift')} "
+                f"bar={result.get('shift_bar')})"
+            )
+        elif delta is not None:
+            # Older causal: delta objective with the INFINITY catch
+            # (f64::MAX/2 ≈ 8.99e+307 → 1.0, "informative but not
+            # astronomically so").
+            value = float(delta)
+            if value > 1e10:
+                logger.info(
+                    f"CHAR TELL: catching INFINITY delta={value:.2e} "
+                    f"→ replacing with 1.0 (first point, no prior)"
+                )
+                value = 1.0
+            logger.info(
+                f"CHAR TELL: {param_name} level trial={trial.number} "
+                f"delta={value:.6f}"
+            )
+        else:
+            self._char_study.tell(trial.number, state=TrialState.FAIL)
+            logger.info(f"CHAR TELL: trial={trial.number} FAIL (no z, no delta)")
+            return
+
+        self._char_study.tell(trial.number, value)
 
         # Check exhaustion: all (param × level) combinations visited?
         if len(self._converged_params) < len(self._param_names):
@@ -1073,9 +1091,9 @@ class ProbeCoordinator:
                 f"level={probe['level']}"
             )
 
-            # Close the loop: causal computes delta, tell char study.
-            delta = self._process_probe_result(probe)
-            self._tell_char_study(probe['param_name'], delta)
+            # Close the loop: causal computes shift/z/delta, tell char study.
+            result = self._process_probe_result(probe)
+            self._tell_char_study(probe['param_name'], result)
 
             self._push_count = 0
             self._pause_count = 0
