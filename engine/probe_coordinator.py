@@ -158,6 +158,10 @@ class ProbeCoordinator:
         self._char_trial: Any = None  # in-flight trial
         self._char_step: float = 0.0
         self._refinement_level = 0
+        # (param_name, level) cells probed at the current step depth —
+        # coverage contract: revisits impossible while unvisited cells
+        # remain; reset on refinement (new grid).
+        self._visited_cells: set = set()
         self._param_names: List[str] = []
         self._param_bounds: Dict[str, Dict] = {}  # name → {lower, upper, is_int, idx}
         self._current_probe: Optional[Dict[str, Any]] = None
@@ -733,36 +737,45 @@ class ProbeCoordinator:
         step = self._derive_initial_step(global_low, global_high)
         self._char_step = step
 
-        # n_startup_trials = number of params × levels per param.
-        # This ensures random exploration covers all params before
-        # TPE takes over. TPE's startup IS the coverage pass.
-        n_params = len(self._param_names)
-        n_startup = max(5, n_params * 3)
-
+        # QMC (scrambled Sobol) walk: spread-first coverage order.
+        # The study records z per cell; selection is coverage-driven,
+        # not model-driven (the TPE anti-concentration lesson).
         self._char_study = optuna.create_study(
             direction='maximize',
-            sampler=optuna.samplers.TPESampler(n_startup_trials=n_startup),
+            sampler=optuna.samplers.QMCSampler(
+                qmc_type='sobol', scramble=True,
+                seed=abs(hash(self.breeder_id)) % (2**31),
+            ),
             storage=optuna.storages.InMemoryStorage(),
             study_name=f'char_{self.breeder_id}_r0',
         )
 
         logger.info(
-            f"CHAR INIT: {n_params} params, step={step:.1f}, "
-            f"startup={n_startup}, threshold={self.convergence_threshold}"
+            f"CHAR INIT: {len(self._param_names)} params, step={step:.1f}, "
+            f"qmc walk, threshold={self.convergence_threshold}"
         )
 
     def _ask_next_probe(self) -> Optional[Dict[str, Any]]:
         """Ask the study for the next param + level to push.
 
-        One trial samples which param (categorical) and what level
-        (stepped float). The coordinator builds a push config from
-        that — one param at the sampled level, rest at neutral.
+        QMC walk under the coverage contract: converged params are
+        excluded from suggestion; a draw landing on an already-visited
+        cell FAILs that trial and falls through to the first unvisited
+        cell directly — revisits impossible while unvisited cells
+        remain, walk always advances.
         """
+        from optuna.trial import TrialState
+
         if self._char_study is None:
             return None
 
+        eligible_params = [n for n in self._param_names
+                           if n not in self._converged_params]
+        if not eligible_params:
+            return None
+
         trial = self._char_study.ask()
-        param_name = trial.suggest_categorical('push_param', self._param_names)
+        param_name = trial.suggest_categorical('push_param', eligible_params)
         bounds = self._param_bounds[param_name]
 
         level = trial.suggest_float(
@@ -771,6 +784,33 @@ class ProbeCoordinator:
         )
         if bounds.get('is_int'):
             level = float(int(round(level)))
+
+        if (param_name, level) in self._visited_cells:
+            # Collision: fail the draw, take the first unvisited cell
+            # deterministically. Walk keeps advancing; QMC keeps the
+            # spread order for the non-colliding draws.
+            self._char_study.tell(trial.number, state=TrialState.FAIL)
+            for name in eligible_params:
+                b = self._param_bounds[name]
+                n_lv = int(round((b['upper'] - b['lower']) / self._char_step)) + 1
+                for i in range(n_lv):
+                    lv = round(b['lower'] + i * self._char_step, 6)
+                    if b.get('is_int'):
+                        lv = float(int(round(lv)))
+                    if (name, lv) not in self._visited_cells:
+                        param_name, level = name, lv
+                        break
+                else:
+                    continue
+                break
+            else:
+                return None  # full coverage at this depth
+            # Record the fallback cell on a fresh trial via system
+            # attrs (categorical distributions cannot vary per trial).
+            trial = self._char_study.ask()
+            trial.set_system_attr('fallback_param', param_name)
+            trial.set_system_attr('fallback_level', level)
+        self._visited_cells.add((param_name, level))
 
         self._char_trial = trial
 
@@ -897,6 +937,7 @@ class ProbeCoordinator:
         old_step = self._char_step
         new_step = old_step / 2.0
         self._char_step = new_step
+        self._visited_cells = set()
         self._refinement_level += 1
 
         n_params = len(self._param_names)

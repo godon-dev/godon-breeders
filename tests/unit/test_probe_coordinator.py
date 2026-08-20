@@ -546,7 +546,9 @@ def test_exhaustion_triggers_refinement():
 
 
 def test_convergence_all_params_done():
-    """When all params converged, _ask_next_probe still works but DONE triggers via state."""
+    """With all params converged, _ask_next_probe returns None (coverage
+    contract: no eligible param → nothing to propose; DONE is driven by
+    the state machine via this None)."""
     print("\n=== test_convergence_all_params_done ===")
     coord = _make_coordinator(params={
         'param_0': {'constraints': [{'lower': 0.0, 'upper': 100.0}]},
@@ -555,16 +557,11 @@ def test_convergence_all_params_done():
 
     coord._converged_params.add('param_0')
 
-    # With all params converged, the coordinator's DONE check in
-    # _handle_probe_push triggers when _ask_next_probe returns None.
-    # But ask itself still works (TPE can still sample). The DONE
-    # logic is in the state machine, not in ask.
     probe = coord._ask_next_probe()
-    # Probe is not None — study still gives trials. Convergence is
-    # checked by the state machine via _converged_params.
-    assert probe is not None
+    assert probe is None, \
+        f"Coverage contract: all params converged → None, got {probe}"
 
-    print("  converged param → study still samples (state machine handles DONE)")
+    print("  all params converged → ask returns None (state machine handles DONE)")
     print("  PASS")
 
 
@@ -617,7 +614,8 @@ def test_get_char_status():
 
 
 def test_ask_after_all_converged():
-    """When all params converged, study still samples (DONE handled by state machine)."""
+    """All params converged → ask returns None under the coverage
+    contract (DONE handled by the state machine on this None)."""
     print("\n=== test_ask_after_all_converged ===")
     coord = _make_coordinator()
     coord._init_characterization()
@@ -626,12 +624,11 @@ def test_ask_after_all_converged():
         coord._converged_params.add(p)
 
     probe = coord._ask_next_probe()
-    # Study still samples — convergence is checked by the state machine
-    # via _converged_params in _handle_probe_push, not by the study.
-    assert probe is not None
+    assert probe is None, \
+        f"Coverage contract: all converged → None, got {probe}"
     assert len(coord._converged_params) == len(coord._param_names)
 
-    print("  all converged → study still samples, state machine handles DONE")
+    print("  all converged → ask returns None, state machine handles DONE")
     print("  PASS")
 
 
