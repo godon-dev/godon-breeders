@@ -149,14 +149,12 @@ class ProbeCoordinator:
         self._cooldown_count = 0
         self._hold_count = 0
 
-        # Characterization — ONE study with all params as dimensions.
-        # TPE picks both which param to push and at what level, guided
-        # by delta from causal. Disposable per refinement level: close
-        # on convergence/exhaustion, create new at halved step.
-        # Curves persist in causal's CurveRegistry across studies.
-        self._char_study: Any = None  # single optuna.Study
-        self._char_trial: Any = None  # in-flight trial
-        self._char_step: float = 0.0
+        # Characterization — deterministic coverage walk over all
+        # params. The walker picks which param (round-robin, converged
+        # params retired) and which level (farthest-point). Curves
+        # persist in causal's CurveRegistry; this side holds no state
+        # beyond walk progress.
+        self._char_walk: Any = None  # engine.coverage_walk.CoverageWalk
         self._refinement_level = 0
         self._param_names: List[str] = []
         self._param_bounds: Dict[str, Dict] = {}  # name → {lower, upper, is_int, idx}
@@ -695,15 +693,14 @@ class ProbeCoordinator:
     # ─── Characterization Study ─────────────────────────────────────
 
     def _init_characterization(self):
-        """Create ONE characterization study with all params as dimensions.
+        """Build the deterministic coverage walk over all params.
 
-        Each trial samples a categorical (which param to push) and a
-        float (at what level). TPE learns across both: which params
-        produce high delta (informative) and which levels within those
-        params are worth probing. No coverage guard — the sampler's
-        startup randomness IS the coverage pass.
+        Each call advances a deterministic walk: round-robin across
+        params (converged params retired), farthest-point level order
+        within each param. Coverage is by construction — no unmeasured
+        level is skipped while the walk runs.
         """
-        import optuna
+        from engine.coverage_walk import CoverageWalk
 
         neutral = self._get_neutral_params()
         if not neutral:
@@ -714,8 +711,7 @@ class ProbeCoordinator:
             return
 
         self._param_names = []
-        global_low = float('inf')
-        global_high = float('-inf')
+        walk_bounds = {}
         for param_idx, ub in enumerate(upper_bounds):
             name = ub['name']
             lower = ub.get('lower', 0.0)
@@ -726,53 +722,34 @@ class ProbeCoordinator:
                 'is_int': is_int, 'idx': param_idx,
             }
             self._param_names.append(name)
-            global_low = min(global_low, lower)
-            global_high = max(global_high, upper)
+            walk_bounds[name] = (lower, upper, bool(is_int))
 
-        # Single step for all params — derived from the widest range.
-        step = self._derive_initial_step(global_low, global_high)
-        self._char_step = step
+        self._char_walk = CoverageWalk(walk_bounds)
 
-        # n_startup_trials = number of params × levels per param.
-        # This ensures random exploration covers all params before
-        # TPE takes over. TPE's startup IS the coverage pass.
-        n_params = len(self._param_names)
-        n_startup = max(5, n_params * 3)
-
-        self._char_study = optuna.create_study(
-            direction='maximize',
-            sampler=optuna.samplers.TPESampler(n_startup_trials=n_startup),
-            storage=optuna.storages.InMemoryStorage(),
-            study_name=f'char_{self.breeder_id}_r0',
+        floors = ", ".join(
+            f"{n}={self._char_walk.status()[n]['step']:.1f}"
+            for n in self._param_names
         )
-
         logger.info(
-            f"CHAR INIT: {n_params} params, step={step:.1f}, "
-            f"startup={n_startup}, threshold={self.convergence_threshold}"
+            f"CHAR INIT: {len(self._param_names)} params, floors: {floors}, "
+            f"threshold={self.convergence_threshold}"
         )
 
     def _ask_next_probe(self) -> Optional[Dict[str, Any]]:
-        """Ask the study for the next param + level to push.
+        """Advance the coverage walk: next param + level to push.
 
-        One trial samples which param (categorical) and what level
-        (stepped float). The coordinator builds a push config from
-        that — one param at the sampled level, rest at neutral.
+        Returns None when the walk is finished (all params converged,
+        or best-effort after refinement depth is exhausted). The push
+        config is one param at the walked level, rest at neutral.
         """
-        if self._char_study is None:
+        if self._char_walk is None:
             return None
 
-        trial = self._char_study.ask()
-        param_name = trial.suggest_categorical('push_param', self._param_names)
+        nxt = self._char_walk.next_probe(self._converged_params)
+        if nxt is None:
+            return None
+        param_name, level = nxt
         bounds = self._param_bounds[param_name]
-
-        level = trial.suggest_float(
-            'push_level', bounds['lower'], bounds['upper'],
-            step=self._char_step,
-        )
-        if bounds.get('is_int'):
-            level = float(int(round(level)))
-
-        self._char_trial = trial
 
         neutral = self._get_neutral_params()
         config = dict(neutral)
@@ -789,44 +766,38 @@ class ProbeCoordinator:
         }
 
     def _tell_char_study(self, param_name: str, result: Optional[dict]):
-        """Tell the characterization study the information score.
+        """Record a completed probe: log the information score, check
+        coverage exhaustion.
 
-        Objective = z (surprise ÷ its own measurement uncertainty) when
-        causal provides it — noise wiggles score ~1 and stop attracting
-        the sampler, real structure scores high. Falls back to the raw
-        delta objective (with INFINITY catch) against older causal.
+        z (surprise ÷ its own measurement uncertainty) is logged when
+        causal provides it — the per-probe paper trail in Loki. Falls
+        back to logging raw delta (with INFINITY catch) against older
+        causal. Convergence is NOT decided here: causal's converged
+        flag drives that (handled in _process_probe_result).
 
-        Convergence is NOT decided here: causal's converged flag drives
-        that; delta remains the surface-movement signal.
+        Exhaustion = the walk can no longer advance at current floors
+        while unconverged params remain → refine (halve floors) or, at
+        depth limit, accept best effort.
         """
-        from optuna.trial import TrialState
-
-        if self._char_trial is None:
-            return
-
-        trial = self._char_trial
-        self._char_trial = None
-
         if result is None:
-            self._char_study.tell(trial.number, state=TrialState.FAIL)
-            logger.info(f"CHAR TELL: trial={trial.number} FAIL (causal unavailable)")
+            logger.info(
+                f"CHAR TELL: {param_name} FAIL (causal unavailable)"
+            )
             return
 
         z = result.get('z')
         delta = result.get('delta')
 
         if z is not None:
-            value = float(z)
             logger.info(
-                f"CHAR TELL: {param_name} trial={trial.number} "
-                f"z={value:.3f} (delta={delta} "
+                f"CHAR TELL: {param_name} "
+                f"z={float(z):.3f} (delta={delta} "
                 f"drift={result.get('drift')} "
                 f"bar={result.get('shift_bar')})"
             )
         elif delta is not None:
-            # Older causal: delta objective with the INFINITY catch
-            # (f64::MAX/2 ≈ 8.99e+307 → 1.0, "informative but not
-            # astronomically so").
+            # Older causal: delta with the INFINITY catch
+            # (f64::MAX/2 ≈ 8.99e+307 → 1.0).
             value = float(delta)
             if value > 1e10:
                 logger.info(
@@ -835,57 +806,35 @@ class ProbeCoordinator:
                 )
                 value = 1.0
             logger.info(
-                f"CHAR TELL: {param_name} level trial={trial.number} "
-                f"delta={value:.6f}"
+                f"CHAR TELL: {param_name} delta={value:.6f}"
             )
         else:
-            self._char_study.tell(trial.number, state=TrialState.FAIL)
-            logger.info(f"CHAR TELL: trial={trial.number} FAIL (no z, no delta)")
+            logger.info(f"CHAR TELL: {param_name} FAIL (no z, no delta)")
             return
 
-        self._char_study.tell(trial.number, value)
-
-        # Check exhaustion: all (param × level) combinations visited?
+        # Coverage check: can the walk still advance?
         if len(self._converged_params) < len(self._param_names):
-            n_complete = sum(
-                1 for t in self._char_study.trials
-                if t.state == TrialState.COMPLETE
-            )
-            # Total discrete space = sum of levels across all params
-            total_space = sum(
-                self._count_param_levels(name)
-                for name in self._param_names
+            st = self._char_walk.status() if self._char_walk else {}
+            progress = ", ".join(
+                f"{n}={st[n]['levels_measured']}/{st[n]['levels_total']}"
+                for n in self._param_names if n in st
             )
             logger.info(
-                f"CHAR PROGRESS: {n_complete}/{total_space} "
-                f"combinations explored, "
+                f"CHAR PROGRESS: {progress} levels, "
                 f"{len(self._converged_params)}/{len(self._param_names)} "
                 f"params converged"
             )
-            if n_complete >= total_space:
-                logger.info(
-                    f"CHAR EXHAUSTED: {n_complete}/{total_space} → refining"
-                )
+            if not self._char_walk.can_probe(self._converged_params):
+                logger.info("CHAR EXHAUSTED: walk complete at current floors")
                 self._refine_study()
 
-    def _count_param_levels(self, param_name: str) -> int:
-        """Number of discrete levels for a param at current step."""
-        bounds = self._param_bounds.get(param_name)
-        if not bounds:
-            return 0
-        if self._char_step <= 0:
-            return 0
-        return int(round((bounds['upper'] - bounds['lower']) / self._char_step)) + 1
-
     def _refine_study(self):
-        """Close current study, create new one at halved step.
+        """Halve the walk's resolution floors.
 
-        Optuna drops params with inconsistent distributions when step
-        changes mid-study. Disposable studies are the workaround.
-        Curves persist in causal's CurveRegistry.
+        Already-measured levels stay measured (visited set persists);
+        the next pass measures the midpoints the finer floor exposes.
+        Curves persist in causal's CurveRegistry throughout.
         """
-        import optuna
-
         if self._refinement_level >= self.refinement_depth:
             logger.info(
                 f"REFINEMENT: exhausted (depth={self.refinement_depth}) "
@@ -894,73 +843,21 @@ class ProbeCoordinator:
             self._converged_params.update(self._param_names)
             return
 
-        old_step = self._char_step
-        new_step = old_step / 2.0
-        self._char_step = new_step
+        old_floors = {
+            n: self._char_walk.status()[n]['step']
+            for n in self._param_names
+        } if self._char_walk else {}
+
+        self._char_walk.refine()
         self._refinement_level += 1
 
-        n_params = len(self._param_names)
-        n_startup = max(5, n_params * 3)
-
-        self._char_study = optuna.create_study(
-            direction='maximize',
-            sampler=optuna.samplers.TPESampler(n_startup_trials=n_startup),
-            storage=optuna.storages.InMemoryStorage(),
-            study_name=f'char_{self.breeder_id}_r{self._refinement_level}',
+        new_floors = ", ".join(
+            f"{n}={old_floors[n]:.2f}→{self._char_walk.status()[n]['step']:.2f}"
+            for n in self._param_names if n in old_floors
         )
-
         logger.info(
-            f"REFINEMENT: study r{self._refinement_level - 1}→"
-            f"r{self._refinement_level} step={old_step:.2f}→{new_step:.2f}"
+            f"REFINEMENT: pass {self._refinement_level} floors: {new_floors}"
         )
-
-    # ─── Step Derivation ─────────────────────────────────────────────
-
-    def _derive_initial_step(self, lower: float, upper: float,
-                             is_int: bool = False) -> float:
-        """Derive initial step size for stepped trial sampling.
-
-        Starts coarse (range / 4) to keep the initial probe count small.
-        The metaheuristic sampler within the characterization study
-        picks which levels to visit; refinement halves the step where
-        the curve is still moving.
-
-        For integer params: snap to an integer step that divides the
-        range into even segments and reaches the upper bound. We try
-        divisors of the range starting from the raw /4 estimate down
-        to 1, picking the largest that divides cleanly.
-        """
-        param_range = upper - lower
-        if param_range <= 0:
-            return param_range
-
-        # Start coarse: 4 segments across the range.
-        step = param_range / 4.0
-
-        if is_int:
-            # Snap to integer step that divides range evenly.
-            # Search outward from the ideal /4 estimate to find
-            # the closest divisor that reaches the upper bound.
-            int_range = int(round(param_range))
-            raw = max(1, int(round(step)))
-            best = None
-            for delta in range(0, max(raw, int_range)):
-                for candidate in (raw - delta, raw + delta):
-                    if candidate < 1:
-                        continue
-                    if int_range % candidate == 0:
-                        if best is None or abs(candidate - raw) < abs(best - raw):
-                            best = candidate
-                if best is not None and delta > 0:
-                    break  # found closest, no need to search further
-            step = float(best) if best else 1.0
-
-        logger.info(
-            f"DERIVED STEP: range=[{lower}, {upper}] "
-            f"threshold={self.convergence_threshold} "
-            f"initial_step={step:.1f} is_int={is_int}"
-        )
-        return step
 
     # ─── Main State Machine ──────────────────────────────────────────
 
@@ -1007,10 +904,10 @@ class ProbeCoordinator:
         if self._count_active_breeders() < 2:
             return self._optimize_result()
 
-        # Initialize characterization study on first entry
-        if self._char_study is None:
+        # Initialize characterization walk on first entry
+        if self._char_walk is None:
             self._init_characterization()
-            if self._char_study is None:
+            if self._char_walk is None:
                 return self._optimize_result()
 
         # Try to become sender
@@ -1189,39 +1086,32 @@ class ProbeCoordinator:
     def get_char_status(self) -> Dict[str, Any]:
         """Structured characterization status for trial attrs / dashboards.
 
-        Exposes study internals: which params converged, refinement
-        levels, trials completed per study, current step sizes.
+        Exposes walk internals: which params converged, refinement
+        level, levels measured per param, current floors.
         """
-        from optuna.trial import TrialState
-
         status = {}
-        if self._char_study is not None:
+        n_measured = 0
+        total = 0
+        if self._char_walk is not None:
+            walk_st = self._char_walk.status()
             for name in self._param_names:
-                n_levels = self._count_param_levels(name)
+                st = walk_st.get(name, {})
                 status[name] = {
                     'converged': name in self._converged_params,
-                    'step': self._char_step,
-                    'levels_total': n_levels,
+                    'step': st.get('step'),
+                    'levels_total': st.get('levels_total'),
+                    'levels_measured': st.get('levels_measured', 0),
                 }
-
-            n_complete = sum(
-                1 for t in self._char_study.trials
-                if t.state == TrialState.COMPLETE
-            )
-            total_space = sum(
-                self._count_param_levels(n) for n in self._param_names
-            )
-        else:
-            n_complete = 0
-            total_space = 0
+                n_measured += st.get('levels_measured', 0)
+                if st.get('levels_total') is not None:
+                    total += st['levels_total']
 
         return {
             'state': self.state,
             'refinement_level': self._refinement_level,
-            'step': self._char_step,
             'params': status,
-            'combinations_explored': n_complete,
-            'combinations_total': total_space,
+            'levels_measured': n_measured,
+            'levels_total': total,
             'converged_count': len(self._converged_params),
             'params_total': len(self._param_names),
         }
