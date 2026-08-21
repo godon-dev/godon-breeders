@@ -121,62 +121,20 @@ def _fake_upper_bounds(settings):
     return bounds
 
 
-# ─── Step Derivation ──────────────────────────────────────────────
-
-def test_step_derivation_float():
-    """Float param: range 0-100, threshold 0.02 → step = 25."""
-    print("\n=== test_step_derivation_float ===")
-    coord = _make_coordinator()
-    step = coord._derive_initial_step(0.0, 100.0, is_int=False)
-    assert step == 25.0, f"Expected 25.0, got {step}"
-    print(f"  step={step}")
-    print("  PASS")
-
-
-def test_step_derivation_int():
-    """Int param: range 0-10, step raw=2.5 → snapped to int."""
-    print("\n=== test_step_derivation_int ===")
-    coord = _make_coordinator()
-    step = coord._derive_initial_step(0.0, 10.0, is_int=True)
-    # round(2.5) = 2 in Python (banker's rounding), step=2 is valid
-    assert step == 2.0, f"Expected 2.0, got {step}"
-    print(f"  step={step}")
-    print("  PASS")
-
-
-def test_step_derivation_int_small_range():
-    """Int param: range 0-3, step raw=0.75 → snapped to 1."""
-    print("\n=== test_step_derivation_int_small_range ===")
-    coord = _make_coordinator()
-    step = coord._derive_initial_step(0.0, 3.0, is_int=True)
-    assert step == 1.0, f"Expected 1.0, got {step}"
-    print(f"  step={step}")
-    print("  PASS")
-
-
-def test_step_derivation_degenerate():
-    """Range 0-0 → step 0."""
-    print("\n=== test_step_derivation_degenerate ===")
-    coord = _make_coordinator()
-    step = coord._derive_initial_step(50.0, 50.0)
-    assert step == 0.0, f"Expected 0.0, got {step}"
-    print(f"  step={step}")
-    print("  PASS")
-
-
-# ─── Characterization Study (single study, all params) ────────────
+# ─── Characterization Coverage Walk ────────────────────────────────
 
 def test_char_init_basic():
-    """3 params → ONE study with all params as dimensions."""
+    """3 params → walk built with per-param floors (range/4)."""
     print("\n=== test_char_init_basic ===")
     coord = _make_coordinator()
     coord._init_characterization()
 
-    assert coord._char_study is not None, "study should be created"
+    assert coord._char_walk is not None, "walk should be created"
     assert len(coord._param_names) == 3
-    assert coord._char_step == 25.0
+    st = coord._char_walk.status()
+    assert st['param_0']['step'] == 25.0  # 0-100 float → floor 25
 
-    print(f"  1 study, {len(coord._param_names)} params, step={coord._char_step}")
+    print(f"  walk built, {len(coord._param_names)} params, floors=25.0")
     print("  PASS")
 
 
@@ -202,41 +160,40 @@ def test_char_ask_picks_param_and_level():
     print("  PASS")
 
 
-def test_char_ask_samples_different_params():
-    """Multiple asks should eventually sample different params (startup randomness)."""
-    print("\n=== test_char_ask_samples_different_params ===")
+def test_char_ask_rotates_params():
+    """Round-robin: first asks hit different params deterministically."""
+    print("\n=== test_char_ask_rotates_params ===")
     coord = _make_coordinator()
     coord._init_characterization()
 
-    seen_params = set()
-    for _ in range(10):
+    seen_params = []
+    for _ in range(3):
         probe = coord._ask_next_probe()
-        if probe:
-            seen_params.add(probe['param_name'])
-            coord._tell_char_study(probe['param_name'], {'delta': 0.5})
+        assert probe is not None
+        seen_params.append(probe['param_name'])
+        coord._tell_char_study(probe['param_name'], {'delta': 0.5})
 
-    # With 3 params and n_startup=9, all 3 should appear
-    assert len(seen_params) >= 2, f"Expected >=2 params, got {seen_params}"
+    # Round-robin: all 3 params in the first 3 asks, no repeats
+    assert len(set(seen_params)) == 3, f"Expected 3 distinct, got {seen_params}"
 
-    print(f"  params seen: {seen_params}")
+    print(f"  params in order: {seen_params}")
     print("  PASS")
 
 
-def test_char_tell_feeds_delta():
-    """Telling delta records it in the study as COMPLETE."""
-    print("\n=== test_char_tell_feeds_delta ===")
+def test_char_tell_logs_delta():
+    """Telling delta records it in the CHAR TELL log line."""
+    print("\n=== test_char_tell_logs_delta ===")
     coord = _make_coordinator()
     coord._init_characterization()
 
     probe = coord._ask_next_probe()
     coord._tell_char_study(probe['param_name'], {'delta': 0.5})
 
-    from optuna.trial import TrialState
-    complete = [t for t in coord._char_study.trials if t.state == TrialState.COMPLETE]
-    assert len(complete) == 1
-    assert complete[0].values == [0.5]
+    # Walk advanced one level for that param
+    st = coord._char_walk.status()
+    assert st[probe['param_name']]['levels_measured'] == 1
 
-    print(f"  told delta=0.5, 1 complete trial")
+    print(f"  told delta=0.5, 1 level measured for {probe['param_name']}")
     print("  PASS")
 
 
@@ -250,18 +207,16 @@ def test_char_tell_catches_infinity():
     # Simulate causal's INFINITY replacement (f64::MAX/2), old-causal shape
     coord._tell_char_study(probe['param_name'], {'delta': 8.988e+307})
 
-    from optuna.trial import TrialState
-    complete = [t for t in coord._char_study.trials if t.state == TrialState.COMPLETE]
-    assert len(complete) == 1
-    # Should be 1.0, not 8.988e+307
-    assert complete[0].values == [1.0], f"Expected [1.0], got {complete[0].values}"
+    # Walk advanced — the catch path did not abort processing
+    st = coord._char_walk.status()
+    assert st[probe['param_name']]['levels_measured'] == 1
 
-    print(f"  caught INFINITY → replaced with 1.0")
+    print(f"  caught INFINITY → walk continues")
     print("  PASS")
 
 
 def test_char_tell_fail_on_none():
-    """None delta (causal unavailable) marks trial as FAIL."""
+    """None result (causal unavailable) logs FAIL, walk unaffected."""
     print("\n=== test_char_tell_fail_on_none ===")
     coord = _make_coordinator()
     coord._init_characterization()
@@ -269,33 +224,37 @@ def test_char_tell_fail_on_none():
     probe = coord._ask_next_probe()
     coord._tell_char_study(probe['param_name'], None)
 
-    from optuna.trial import TrialState
-    failed = [t for t in coord._char_study.trials if t.state == TrialState.FAIL]
-    assert len(failed) == 1
+    # Level stays measured (the probe happened; causal just couldn't price it)
+    st = coord._char_walk.status()
+    assert st[probe['param_name']]['levels_measured'] == 1
 
-    print(f"  told None → 1 FAIL trial")
+    print(f"  told None → FAIL logged, walk state intact")
     print("  PASS")
 
 
 def test_char_tell_prefers_z():
-    """When causal returns z, the study is told z — not delta."""
+    """When causal returns z, CHAR TELL logs z — not delta."""
     print("\n=== test_char_tell_prefers_z ===")
     coord = _make_coordinator()
     coord._init_characterization()
 
     probe = coord._ask_next_probe()
-    coord._tell_char_study(probe['param_name'], {
-        'shift': 0.37, 'shift_bar': 0.012, 'z': 8.3,
-        'drift': False, 'delta': 0.04, 'converged': False,
-    })
 
-    from optuna.trial import TrialState
-    complete = [t for t in coord._char_study.trials if t.state == TrialState.COMPLETE]
-    assert len(complete) == 1
-    assert complete[0].values == [8.3], \
-        f"Expected z=8.3 as objective, got {complete[0].values}"
+    from unittest.mock import patch
+    import engine.probe_coordinator as pc
+    with patch.object(pc, 'logger') as mock_logger:
+        coord._tell_char_study(probe['param_name'], {
+            'shift': 0.37, 'shift_bar': 0.012, 'z': 8.3,
+            'drift': False, 'delta': 0.04, 'converged': False,
+        })
 
-    print(f"  told z=8.3 → objective 8.3")
+    logged = " ".join(str(c.args[0]) for c in mock_logger.info.call_args_list
+                      if c.args)
+    assert 'z=8.300' in logged, f"Expected z=8.300 in CHAR TELL log, got: {logged}"
+    # z is the headline; delta only appears parenthesized
+    assert 'delta=0.04 ' not in logged or '(delta=0.04' in logged
+
+    print(f"  told z=8.3 → logged z=8.300")
     print("  PASS")
 
 
@@ -326,19 +285,20 @@ def test_process_probe_result_returns_dict():
     print("  PASS")
 
 
-def test_refinement_halves_step():
-    """Refinement creates new study at halved step."""
-    print("\n=== test_refinement_halves_step ===")
+def test_refinement_halves_floors():
+    """Refinement halves the walk's resolution floors."""
+    print("\n=== test_refinement_halves_floors ===")
     coord = _make_coordinator()
     coord._init_characterization()
 
-    original_step = coord._char_step
+    old_floor = coord._char_walk.status()['param_0']['step']
     coord._refine_study()
 
-    assert coord._char_step == original_step / 2.0
+    new_floor = coord._char_walk.status()['param_0']['step']
+    assert new_floor == old_floor / 2.0
     assert coord._refinement_level == 1
 
-    print(f"  step {original_step}→{coord._char_step}")
+    print(f"  floor {old_floor}→{new_floor}")
     print("  PASS")
 
 
@@ -364,17 +324,6 @@ def test_refinement_depth_cap():
     print("  PASS")
 
 
-def test_count_param_levels():
-    """Step 25, range 0-100 → 5 levels."""
-    print("\n=== test_count_param_levels ===")
-    coord = _make_coordinator()
-    coord._init_characterization()
-
-    n = coord._count_param_levels('param_0')
-    assert n == 5, f"Expected 5 levels, got {n}"
-
-    print(f"  step=25, range 0-100 → {n} levels")
-    print("  PASS")
 
 # ─── Timeout Deskew ───────────────────────────────────────────────
 
@@ -508,45 +457,52 @@ def test_push_pause_round():
         # After pause completes, should be back in PROBE_PUSH
         assert coord.state == coord.PROBE_PUSH
 
-        # The char study should have 1 complete trial (delta told)
-        from optuna.trial import TrialState
-        complete = [t for t in coord._char_study.trials if t.state == TrialState.COMPLETE]
-        assert len(complete) == 1
-        assert complete[0].values == [0.03]
+        # The walk should show 1 measured level for the probed param
+        st = coord._char_walk.status()
+        assert sum(v['levels_measured'] for v in st.values()) == 1
 
     print(f"  push={coord.push_block_size}, pause={coord.pause_block_size}")
-    print(f"  delta=0.03 told to study, 1 complete trial")
+    print(f"  delta=0.03 told, 1 level measured")
     print("  PASS")
 
 
 def test_exhaustion_triggers_refinement():
-    """Visiting all discrete combinations triggers refinement."""
+    """Walking all levels at current floor triggers refinement."""
     print("\n=== test_exhaustion_triggers_refinement ===")
     coord = _make_coordinator(params={
         'param_0': {'constraints': [{'lower': 0.0, 'upper': 100.0}]},
     })
     coord._init_characterization()
 
-    original_step = coord._char_step
-    n_levels = coord._count_param_levels('param_0')
+    old_floor = coord._char_walk.status()['param_0']['step']
+    n_levels = coord._char_walk.status()['param_0']['levels_total']
 
-    # Ask + tell all levels
+    # Ask + tell all levels at this floor (0-100, floor 25 → 5 levels)
     for i in range(n_levels):
         probe = coord._ask_next_probe()
-        assert probe is not None
+        assert probe is not None, f"ask {i} returned None before exhaustion"
         coord._tell_char_study('param_0', {'delta': 0.5})
 
-    # Should have triggered refinement
-    assert coord._char_step == original_step / 2.0, \
-        f"Expected step {original_step/2.0}, got {coord._char_step}"
+    # The last tell saw the walk exhausted → refinement fired
+    new_floor = coord._char_walk.status()['param_0']['step']
+    assert new_floor == old_floor / 2.0, \
+        f"Expected floor {old_floor/2.0}, got {new_floor}"
     assert coord._refinement_level == 1
 
-    print(f"  {n_levels} levels exhausted → step {original_step}→{coord._char_step}")
+    # And the walk continues at the finer floor (midpoints now in reach)
+    probe = coord._ask_next_probe()
+    assert probe is not None
+    assert probe['level'] not in (0.0, 25.0, 50.0, 75.0, 100.0)
+
+    print(f"  {n_levels} levels exhausted → floor {old_floor}→{new_floor}")
     print("  PASS")
 
 
 def test_convergence_all_params_done():
-    """When all params converged, _ask_next_probe still works but DONE triggers via state."""
+    """All params converged → ask returns None (coverage contract).
+
+    DONE is driven by the state machine via this None.
+    """
     print("\n=== test_convergence_all_params_done ===")
     coord = _make_coordinator(params={
         'param_0': {'constraints': [{'lower': 0.0, 'upper': 100.0}]},
@@ -555,16 +511,11 @@ def test_convergence_all_params_done():
 
     coord._converged_params.add('param_0')
 
-    # With all params converged, the coordinator's DONE check in
-    # _handle_probe_push triggers when _ask_next_probe returns None.
-    # But ask itself still works (TPE can still sample). The DONE
-    # logic is in the state machine, not in ask.
     probe = coord._ask_next_probe()
-    # Probe is not None — study still gives trials. Convergence is
-    # checked by the state machine via _converged_params.
-    assert probe is not None
+    assert probe is None, \
+        f"Coverage contract: all params converged → None, got {probe}"
 
-    print("  converged param → study still samples (state machine handles DONE)")
+    print("  all params converged → ask returns None (state machine handles DONE)")
     print("  PASS")
 
 
@@ -603,21 +554,22 @@ def test_get_char_status():
     assert status['state'] == coord.state
     assert status['converged_count'] == 0
     assert status['params_total'] == 3
-    assert status['combinations_explored'] == 1
+    assert status['levels_measured'] == 1
 
     for name in coord._param_names:
         s = status['params'][name]
         assert 'converged' in s
         assert 'step' in s
         assert 'levels_total' in s
+        assert 'levels_measured' in s
 
     print(f"  {status['converged_count']}/{status['params_total']} converged")
-    print(f"  {status['combinations_explored']}/{status['combinations_total']} explored")
+    print(f"  {status['levels_measured']}/{status['levels_total']} levels measured")
     print("  PASS")
 
 
 def test_ask_after_all_converged():
-    """When all params converged, study still samples (DONE handled by state machine)."""
+    """All params converged → ask returns None under the coverage contract."""
     print("\n=== test_ask_after_all_converged ===")
     coord = _make_coordinator()
     coord._init_characterization()
@@ -626,35 +578,28 @@ def test_ask_after_all_converged():
         coord._converged_params.add(p)
 
     probe = coord._ask_next_probe()
-    # Study still samples — convergence is checked by the state machine
-    # via _converged_params in _handle_probe_push, not by the study.
-    assert probe is not None
+    assert probe is None, \
+        f"Coverage contract: all converged → None, got {probe}"
     assert len(coord._converged_params) == len(coord._param_names)
 
-    print("  all converged → study still samples, state machine handles DONE")
+    print("  all converged → ask returns None, state machine handles DONE")
     print("  PASS")
 
 
 
 if __name__ == '__main__':
     test_fns = [
-        test_step_derivation_float,
-        test_step_derivation_int,
-        test_step_derivation_int_small_range,
-        test_step_derivation_degenerate,
         test_char_init_basic,
-        test_char_init_int_param,
-        test_char_ask_returns_probe,
-        test_char_ask_uses_neutral,
-        test_char_ask_stepped_level,
-        test_char_tell_feeds_delta,
+        test_char_ask_picks_param_and_level,
+        test_char_ask_rotates_params,
+        test_char_tell_logs_delta,
+        test_char_tell_catches_infinity,
         test_char_tell_fail_on_none,
-        test_coverage_guard_cycles,
-        test_coverage_guard_skips_converged,
-        test_coverage_guard_all_converged,
-        test_refinement_creates_new_study,
+        test_char_tell_prefers_z,
+        test_process_probe_result_returns_dict,
+        test_process_probe_result_marks_converged,
+        test_refinement_halves_floors,
         test_refinement_depth_cap,
-        test_count_discrete_levels,
         test_timeout_no_history,
         test_timeout_scales_with_trial_duration,
         test_timeout_tightened_by_rtt,
@@ -662,9 +607,6 @@ if __name__ == '__main__':
         test_push_pause_round,
         test_exhaustion_triggers_refinement,
         test_convergence_all_params_done,
-        test_char_tell_prefers_z,
-        test_process_probe_result_returns_dict,
-        test_process_probe_result_marks_converged,
         test_get_char_status,
         test_ask_after_all_converged,
     ]
