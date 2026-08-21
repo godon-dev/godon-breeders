@@ -568,6 +568,39 @@ def test_get_char_status():
     print("  PASS")
 
 
+def test_init_char_import_via_f_breeder_namespace():
+    """Production namespace regression (bench-4 VOID lesson).
+
+    breeder_worker imports this module as f.breeder.engine.*; the
+    sibling coverage_walk import inside _init_characterization must
+    resolve there. Block the engine.* path and prove the f.breeder
+    path alone is sufficient.
+    """
+    print("\n=== test_init_char_import_via_f_breeder_namespace ===")
+    import importlib
+    real = importlib.import_module('engine.coverage_walk')
+    engine_mod = sys.modules.get('f.breeder.engine') or types.ModuleType('f.breeder.engine')
+    saved_f = sys.modules.get('f.breeder.engine.coverage_walk')
+    saved_e = sys.modules.get('engine.coverage_walk')
+    sys.modules['f.breeder.engine'] = engine_mod
+    sys.modules['f.breeder.engine.coverage_walk'] = real
+    sys.modules['engine.coverage_walk'] = None  # poison fallback path
+    try:
+        coord = _make_coordinator()
+        coord._init_characterization()
+        assert coord._char_walk is not None, "init must work via f.breeder path alone"
+    finally:
+        if saved_e is None:
+            sys.modules.pop('engine.coverage_walk', None)
+        else:
+            sys.modules['engine.coverage_walk'] = saved_e
+        if saved_f is None:
+            sys.modules.pop('f.breeder.engine.coverage_walk', None)
+        else:
+            sys.modules['f.breeder.engine.coverage_walk'] = saved_f
+    print("  f.breeder path alone -> walk built — PASS")
+
+
 def test_ask_after_all_converged():
     """All params converged → ask returns None under the coverage contract."""
     print("\n=== test_ask_after_all_converged ===")
@@ -609,6 +642,7 @@ if __name__ == '__main__':
         test_convergence_all_params_done,
         test_get_char_status,
         test_ask_after_all_converged,
+        test_init_char_import_via_f_breeder_namespace,
     ]
     passed = 0
     for fn in test_fns:

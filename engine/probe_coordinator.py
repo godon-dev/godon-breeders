@@ -700,7 +700,12 @@ class ProbeCoordinator:
         within each param. Coverage is by construction — no unmeasured
         level is skipped while the walk runs.
         """
-        from engine.coverage_walk import CoverageWalk
+        # Production imports this module as f.breeder.engine.* (Windmill
+        # repo layout); the test harness imports it as engine.*.
+        try:
+            from f.breeder.engine.coverage_walk import CoverageWalk
+        except ImportError:
+            from engine.coverage_walk import CoverageWalk
 
         neutral = self._get_neutral_params()
         if not neutral:
