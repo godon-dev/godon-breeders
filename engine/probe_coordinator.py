@@ -103,7 +103,6 @@ class ProbeCoordinator:
         det_cfg = config.get('interference_detection', config.get('detection', {}))
         self.group_id = det_cfg.get('group', config.get('group', 'default'))
 
-        self.min_optimize_trials = det_cfg.get('min_optimize_trials', 15)
         self.push_block_size = det_cfg.get('push_block_size', 10)
         self.pause_block_size = det_cfg.get('pause_block_size', 10)
         self.cooldown_trials = det_cfg.get('cooldown_trials', 5)
@@ -903,8 +902,14 @@ class ProbeCoordinator:
     def _handle_optimize(self, trial) -> Dict[str, Any]:
         self._optimize_count += 1
 
-        if self._optimize_count < self.min_optimize_trials:
-            return self._optimize_result()
+        # Listening from trial 1: an active sender outranks everything.
+        # A breeder that exists can hold — there is no warmup before
+        # receiving. (The old min_optimize_trials gate let a sender
+        # probe a receiver still inside its own warmup.)
+        if self._has_active_sender():
+            self.state = self.HOLD
+            self._hold_count = 0
+            return self._handle_hold(trial)
 
         if self._count_active_breeders() < 2:
             return self._optimize_result()
