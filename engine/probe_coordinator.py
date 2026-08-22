@@ -517,6 +517,9 @@ class ProbeCoordinator:
             'pause_end': self._round_pause_end.isoformat(),
             'convergence_threshold': self.convergence_threshold,
         }
+        bounds = self._param_bounds.get(probe['param_name'])
+        if bounds:
+            payload['param_range'] = bounds['upper'] - bounds['lower']
 
         timeout = self._causal_timeout()
         url = f"{self._causal_url}/characterize"
@@ -683,9 +686,31 @@ class ProbeCoordinator:
         converged = result.get('converged', False)
         param_name = probe['param_name']
 
-        if converged:
-            logger.info(f"CONVERGED: {param_name}")
+        # Two-key retirement: stability AND shape. Converged alone can
+        # retire with a fat unresolved bracket (run 4's threshold edge
+        # stopped at (50,62] by luck). A param retires only when
+        # converged AND every unresolved gap is priced out — its
+        # remaining ignorance (jump × width / range) is below the local
+        # measurement bar, so one more probe cannot see anything.
+        gaps = result.get('gaps') or []
+        local_bar = result.get('shift_bar') or 0.0
+        blocking = [
+            g for g in gaps
+            if g.get('unresolved')
+            and g.get('ignorance', float('inf')) > local_bar
+        ]
+        if converged and not blocking:
+            if param_name not in self._converged_params:
+                logger.info(
+                    f"CONVERGED: {param_name} "
+                    f"(unresolved gaps priced out: {len([g for g in gaps if g.get('unresolved')])})"
+                )
             self._converged_params.add(param_name)
+        elif converged:
+            logger.info(
+                f"CONVERGED but {len(blocking)} gap(s) still priced above the bar — "
+                f"{param_name} stays in rotation (walk bisects the gaps)"
+            )
 
         return result
 

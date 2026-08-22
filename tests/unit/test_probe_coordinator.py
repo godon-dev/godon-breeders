@@ -718,3 +718,60 @@ def test_write_gate_discriminates_sender_self_reads():
     gate = lambda d: d['mode'] == 'hold' and d.get('lease_phase') is not None
     assert gate(receiver_decision) is True
     assert gate(sender_pause_decision) is False
+
+
+# ─── Priced stop: two-key retirement ───────────────────────────────
+
+def _probe_result(converged=True, gaps=None, shift_bar=0.05):
+    return {'converged': converged, 'gaps': gaps or [], 'shift_bar': shift_bar,
+            'delta': 0.005, 'z': 1.0}
+
+def test_retires_when_converged_and_gap_free():
+    import types
+    coord = _make_coordinator()
+    probe = {'param_name': 'param_1', 'param_idx': 1, 'level': 50.0,
+             'config': {'param_0': 50.0, 'param_1': 50.0, 'param_2': 50.0}}
+    coord._query_causal_probe_result = lambda p: _probe_result(
+        converged=True, gaps=[{'from_level': 75.0, 'to_level': 100.0,
+                               'jump': 0.03, 'bars_sum': 0.05, 'width': 25.0,
+                               'unresolved': False, 'ignorance': 0.0075}])
+    coord._process_probe_result(probe)
+    assert 'param_1' in coord._converged_params
+
+def test_no_retire_when_gap_priced_above_bar():
+    # Run 25's (0,50): jump 0.35, ignorance 0.175 >> bar 0.05 — the rise
+    # is worth measuring; converged alone must NOT retire it.
+    import types
+    coord = _make_coordinator()
+    probe = {'param_name': 'param_1', 'param_idx': 1, 'level': 50.0,
+             'config': {'param_0': 50.0, 'param_1': 50.0, 'param_2': 50.0}}
+    coord._query_causal_probe_result = lambda p: _probe_result(
+        converged=True, gaps=[{'from_level': 0.0, 'to_level': 50.0,
+                               'jump': 0.35, 'bars_sum': 0.04, 'width': 50.0,
+                               'unresolved': True, 'ignorance': 0.175}])
+    coord._process_probe_result(probe)
+    assert 'param_1' not in coord._converged_params
+
+def test_retires_when_unresolved_but_priced_out():
+    # A step's bracket can be unresolved forever (bars never overlap
+    # across an edge) — retirement happens when its ignorance is below
+    # the bar: the priced stop proper.
+    import types
+    coord = _make_coordinator()
+    probe = {'param_name': 'param_1', 'param_idx': 1, 'level': 56.0,
+             'config': {'param_0': 50.0, 'param_1': 50.0, 'param_2': 50.0}}
+    coord._query_causal_probe_result = lambda p: _probe_result(
+        converged=True, gaps=[{'from_level': 50.0, 'to_level': 56.0,
+                               'jump': 0.35, 'bars_sum': 0.30, 'width': 6.0,
+                               'unresolved': True, 'ignorance': 0.021}])
+    coord._process_probe_result(probe)
+    assert 'param_1' in coord._converged_params
+
+def test_no_retire_when_not_converged():
+    import types
+    coord = _make_coordinator()
+    probe = {'param_name': 'param_0', 'param_idx': 0, 'level': 50.0,
+             'config': {'param_0': 50.0, 'param_1': 50.0, 'param_2': 50.0}}
+    coord._query_causal_probe_result = lambda p: _probe_result(converged=False)
+    coord._process_probe_result(probe)
+    assert 'param_0' not in coord._converged_params
