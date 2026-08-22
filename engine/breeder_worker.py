@@ -1114,8 +1114,15 @@ class BreederWorker:
                         # Stash effectuation params BEFORE study.tell — trial is frozen after tell
                         trial.set_user_attr('effectuation_params', json.dumps(params))
 
-                        # If receiver HOLD trial: write observations to shared table
-                        if detection_mode == 'hold' and hasattr(self._probe_coordinator, 'record_receiver_observation'):
+                        # If receiver HOLD trial: write observations to shared table.
+                        # lease_phase gate: only the receiver's HOLD carries the
+                        # observed phase; the sender's pause parks return mode
+                        # 'hold' WITHOUT a phase — those are the sender's own
+                        # node self-reads and must never enter the receiver
+                        # table (they poisoned shift medians as ~0.5 rows).
+                        if (detection_mode == 'hold'
+                                and decision.get('lease_phase') is not None
+                                and hasattr(self._probe_coordinator, 'record_receiver_observation')):
                             obj_readings = {}
                             for obj in self.config.get('objectives', []):
                                 oname = obj.get('name', 'unknown')
