@@ -676,3 +676,45 @@ def test_receiver_holds_from_first_trial():
     assert coord.state == coord.HOLD, f"expected HOLD, got {coord.state}"
     assert result['mode'] == 'hold', f"expected hold, got {result}"
     assert result['params'] == {'param_0': 50.0, 'param_1': 50.0, 'param_2': 50.0}
+
+
+# ─── Receiver-table write gate (sender self-read exclusion) ────────
+
+def test_pause_return_has_no_lease_phase():
+    """The sender's PROBE_PAUSE parks return mode 'hold' WITHOUT a
+    lease_phase — this is the discriminator the worker's receiver-write
+    gate relies on. Sender pause trials are the sender's own node
+    self-reads and must never enter receiver_observations (they
+    poisoned shift medians as ~0.5 rows: run-23 phantom +0.339)."""
+    import types
+    coord = _make_coordinator()
+    coord.state = coord.PROBE_PUSH
+    coord._current_probe = {'param_name': 'param_0', 'param_idx': 0,
+                            'level': 50.0, 'config': {'param_0': 50.0}}
+    coord._push_count = coord.push_block_size  # force PAUSE on next trial
+    coord._pause_count = 0
+    decision = coord._handle_probe_pause(types.SimpleNamespace(number=9))
+    assert decision['mode'] == 'hold'
+    assert decision.get('lease_phase') is None, \
+        "sender pause must stay untagged or the write gate breaks"
+
+def test_hold_return_carries_lease_phase():
+    """Receiver HOLD always carries the observed lease phase — the
+    positive side of the write-gate discriminator."""
+    import types
+    coord = _make_coordinator()
+    coord.state = coord.HOLD
+    coord._hold_count = 0
+    coord._db = lambda op, desc=None: 'probe_push'   # observed phase
+    decision = coord._handle_hold(types.SimpleNamespace(number=1))
+    assert decision['mode'] == 'hold'
+    assert decision.get('lease_phase') == 'probe_push'
+
+def test_write_gate_discriminates_sender_self_reads():
+    """The exact worker gate: receiver HOLD rows written, sender pause
+    rows (mode 'hold', no phase) rejected."""
+    receiver_decision = {'mode': 'hold', 'lease_phase': 'probe_pause'}
+    sender_pause_decision = {'mode': 'hold', 'lease_phase': None}
+    gate = lambda d: d['mode'] == 'hold' and d.get('lease_phase') is not None
+    assert gate(receiver_decision) is True
+    assert gate(sender_pause_decision) is False
