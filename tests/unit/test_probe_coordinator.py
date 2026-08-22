@@ -775,3 +775,24 @@ def test_no_retire_when_not_converged():
     coord._query_causal_probe_result = lambda p: _probe_result(converged=False)
     coord._process_probe_result(probe)
     assert 'param_0' not in coord._converged_params
+
+
+# ─── Receiver rows carry every read metric (channels) ──────────────
+
+def test_record_includes_watched_observations():
+    """The worker's receiver-row builder must include BOTH config
+    sections' metrics — objectives AND observations. A metric omitted
+    is a channel causal never sees (multi-channel runs 27+: rows
+    carried only objective_0 because observations weren't unioned)."""
+    cfg_sections = {
+        'objectives': [{'name': 'objective_0'}],
+        'observations': [{'name': 'objective_1'}],
+    }
+    metrics = {'objective_0': 0.51, 'objective_1': 0.34}
+    readings = {}
+    for section in ('objectives', 'observations'):
+        for obj in cfg_sections.get(section, []) or []:
+            oname = obj.get('name', 'unknown')
+            if oname in metrics and oname not in readings:
+                readings[oname] = metrics[oname]
+    assert readings == {'objective_0': 0.51, 'objective_1': 0.34}

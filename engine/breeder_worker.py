@@ -1123,11 +1123,16 @@ class BreederWorker:
                         if (detection_mode == 'hold'
                                 and decision.get('lease_phase') is not None
                                 and hasattr(self._probe_coordinator, 'record_receiver_observation')):
+                            # Record every metric the recon read this trial —
+                            # objectives AND watched observations. Channels on
+                            # the causal side are whatever keys rows carry;
+                            # a metric omitted here is a channel never measured.
                             obj_readings = {}
-                            for obj in self.config.get('objectives', []):
-                                oname = obj.get('name', 'unknown')
-                                if oname in metrics:
-                                    obj_readings[oname] = metrics[oname]
+                            for section in ('objectives', 'observations'):
+                                for obj in self.config.get(section, []) or []:
+                                    oname = obj.get('name', 'unknown')
+                                    if oname in metrics and oname not in obj_readings:
+                                        obj_readings[oname] = metrics[oname]
                             if obj_readings:
                                 self._probe_coordinator.record_receiver_observation(
                                     trial_num=trial.number,
