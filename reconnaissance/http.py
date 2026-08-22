@@ -208,6 +208,22 @@ def main(context: Dict[str, Any], targets: List[Dict[str, Any]], settings: Dict[
         if result.get('noise_cv') is not None:
             metric_noise[guardrail_name] = result['noise_cv']
 
+    # Watched observations: read every trial like objectives, but never
+    # fed to the optimizer. These are the extra readout channels —
+    # receiver rows and per-channel curves are built from whatever
+    # metrics land here.
+    for observation in context.get('observations', []) or []:
+        obs_name = observation.get('name')
+        if obs_name in metric_data:
+            continue
+        logger.info(f"Gathering observation metric: {obs_name}")
+        recon_config = observation.get('reconnaissance', {})
+        base_url = recon_config.get('url', global_url)
+        result = _gather_single_metric(base_url, obs_name, recon_config)
+        metric_data[obs_name] = result['value']
+        if result.get('noise_cv') is not None:
+            metric_noise[obs_name] = result['noise_cv']
+
     logger.info(f"HTTP reconnaissance completed with {len(metric_data)} metrics")
 
     return {

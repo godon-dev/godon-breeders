@@ -373,3 +373,34 @@ class TestHttpReconnaissanceMain:
         result = recon_main(context, [], {})
         assert result['status'] == 'completed'
         assert result['metrics'] == {}
+
+
+def test_recon_gathers_watched_observations():
+    """Observations section metrics must land in the metrics dict —
+    they are the extra readout channels. (Run 28: rows carried only
+    objective_0 because recon never read objective_1.)"""
+    from reconnaissance.http import main
+    context = {
+        'reconnaissance': {'type': 'http', 'http': {'url': 'http://bench:8090'}},
+        'objectives': [{'name': 'objective_0', 'reconnaissance': {
+            'service': 'http', 'path': '/metrics/json', 'key': 'objective_0',
+            'samples': 1, 'stabilization_seconds': 0, 'interval': 0, 'aggregation': 'median'}}],
+        'observations': [{'name': 'objective_1', 'reconnaissance': {
+            'service': 'http', 'path': '/metrics/json', 'key': 'objective_1',
+            'samples': 1, 'stabilization_seconds': 0, 'interval': 0, 'aggregation': 'median'}}],
+    }
+    # monkeypatch _gather_single_metric
+    import reconnaissance.http as H
+    calls = []
+    def fake(base_url, name, cfg):
+        calls.append(name)
+        return {'value': 0.5 if name == 'objective_0' else 0.3, 'noise_cv': None}
+    orig = H._gather_single_metric
+    H._gather_single_metric = fake
+    try:
+        result = main(context=context, targets=[])
+    finally:
+        H._gather_single_metric = orig
+    assert result['metrics']['objective_0'] == 0.5
+    assert result['metrics']['objective_1'] == 0.3, "observation channel must be gathered"
+    assert calls == ['objective_0', 'objective_1']
