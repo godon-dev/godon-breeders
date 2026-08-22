@@ -656,3 +656,23 @@ if __name__ == '__main__':
     print(f"Results: {passed}/{total} passed")
     if passed < total:
         sys.exit(1)
+
+
+# ─── Listening from trial 1 (warmup gate removed) ─────────────────
+
+def test_receiver_holds_from_first_trial():
+    """An active sender outranks warmup: a breeder at trial 1 with a
+    leased sender must HOLD, not optimize. Regression for the startup
+    race where the sender probed a receiver still inside its own
+    min_optimize_trials warmup (saturation run 23, param_0@50 = -0.68)."""
+    import types
+    coord = _make_coordinator()
+    # DB answers: an active sender exists (lease held, fresh heartbeat)
+    coord._db = lambda op, desc=None: True
+
+    trial = types.SimpleNamespace(number=1)
+    result = coord._handle_optimize(trial)
+
+    assert coord.state == coord.HOLD, f"expected HOLD, got {coord.state}"
+    assert result['mode'] == 'hold', f"expected hold, got {result}"
+    assert result['params'] == {'param_0': 50.0, 'param_1': 50.0, 'param_2': 50.0}
