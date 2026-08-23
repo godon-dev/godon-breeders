@@ -634,13 +634,22 @@ def test_multi_receiver_char_tell_logs_per_receiver():
             records.append(record.getMessage())
 
     handler = _Capture()
-    logger = _logging.getLogger('engine.probe_coordinator')
-    logger.addHandler(handler)
-    logger.setLevel(_logging.INFO)
+    # Full-suite pollution guard: earlier test files (worker lifecycle)
+    # replace f.breeder.shared.otel_logging with a MagicMock whose
+    # get_logger returns a Mock — the coordinator module imported under
+    # that regime holds a Mock logger and emits nothing. Inject a real
+    # logger for the duration of the call; order-independent.
+    import engine.probe_coordinator as _pc_mod
+    cap_logger = _logging.getLogger('test.char.tell.per_recv')
+    cap_logger.addHandler(handler)
+    cap_logger.setLevel(_logging.INFO)
+    saved_logger = _pc_mod.logger
+    _pc_mod.logger = cap_logger
     try:
         coord._tell_char_study(probe['param_name'], resp)
     finally:
-        logger.removeHandler(handler)
+        _pc_mod.logger = saved_logger
+        cap_logger.removeHandler(handler)
 
     per_recv = [m for m in records if 'CHAR TELL:' in m and
                 (' B ' in m or ' C ' in m)]
