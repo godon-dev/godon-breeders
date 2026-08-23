@@ -539,6 +539,121 @@ def test_process_probe_result_marks_converged():
     print("  PASS")
 
 
+def test_multi_receiver_retires_only_when_every_receiver_converged():
+    """Multi-receiver contract (receiver-keyed curves).
+
+    causal's top-level `converged` is the all-receiver aggregate. The
+    two-key retirement must honor it: one unconverged downstream
+    receiver keeps the param in rotation even though the direct
+    receiver is stable — every probe feeds all listeners, so the walk
+    keeps going until all of them settle.
+    """
+    print("\n=== test_multi_receiver_retires_only_when_every_receiver_converged ===")
+    from unittest.mock import patch
+    coord = _make_coordinator()
+    coord._init_characterization()
+
+    probe = {'param_name': 'param_1', 'level': 75.0, 'param_idx': 1}
+
+    # Receiver B (direct): converged. Receiver C (downstream): not yet.
+    # Top-level aggregate: converged=False.
+    resp_mixed = {
+        'shift': 0.001, 'shift_bar': 0.05, 'z': 0.3, 'delta': 0.004,
+        'converged': False, 'gaps': [], 'unresolved_gaps': 0,
+        'primary_receiver': 'B', 'primary_channel': 'objective_0',
+        'receivers': {
+            'B': {'primary_channel': 'objective_0', 'shift': 0.001,
+                  'shift_bar': 0.05, 'z': 0.2, 'drift': False,
+                  'delta': 0.004, 'converged': True, 'gaps': [],
+                  'unresolved_gaps': 0, 'channels': {}},
+            'C': {'primary_channel': 'objective_0', 'shift': 0.002,
+                  'shift_bar': 0.05, 'z': 0.4, 'drift': False,
+                  'delta': 0.05, 'converged': False, 'gaps': [],
+                  'unresolved_gaps': 0, 'channels': {}},
+        },
+    }
+    with patch.object(coord, '_query_causal_probe_result', return_value=resp_mixed):
+        coord._process_probe_result(probe)
+    assert 'param_1' not in coord._converged_params, \
+        "one unconverged receiver must keep the param in rotation"
+    print("  B converged + C not → param stays in rotation")
+
+    # All receivers converged, gaps priced out → retired.
+    resp_all = {
+        'shift': 0.001, 'shift_bar': 0.05, 'z': 0.3, 'delta': 0.004,
+        'converged': True, 'gaps': [], 'unresolved_gaps': 0,
+        'primary_receiver': 'B', 'primary_channel': 'objective_0',
+        'receivers': {
+            'B': dict(resp_mixed['receivers']['B']),
+            'C': dict(resp_mixed['receivers']['C'], converged=True, delta=0.004),
+        },
+    }
+    with patch.object(coord, '_query_causal_probe_result', return_value=resp_all):
+        coord._process_probe_result(probe)
+    assert 'param_1' in coord._converged_params, \
+        "all receivers converged + gaps priced → retire"
+    print("  all receivers converged → param retired")
+
+    print("  PASS")
+
+
+def test_multi_receiver_char_tell_logs_per_receiver():
+    """The receivers map produces one CHAR TELL line per listener.
+
+    The per-listener paper trail in Loki: shift/z/conv per receiver,
+    primary marked.
+    """
+    print("\n=== test_multi_receiver_char_tell_logs_per_receiver ===")
+    import logging as _logging
+    from unittest.mock import patch
+    coord = _make_coordinator()
+    coord._init_characterization()
+
+    probe = coord._ask_next_probe()
+    assert probe is not None, "walk must offer a first probe"
+    resp = {
+        'shift': 0.2, 'shift_bar': 0.05, 'z': 1.2, 'delta': 0.01,
+        'converged': False, 'gaps': [], 'unresolved_gaps': 0,
+        'primary_receiver': 'B', 'primary_channel': 'objective_0',
+        'receivers': {
+            'B': {'primary_channel': 'objective_0', 'shift': 0.2,
+                  'shift_bar': 0.05, 'z': 1.2, 'drift': False,
+                  'delta': 0.01, 'converged': False, 'gaps': [],
+                  'unresolved_gaps': 1, 'channels': {}},
+            'C': {'primary_channel': 'objective_0', 'shift': 0.01,
+                  'shift_bar': 0.04, 'z': 0.2, 'drift': False,
+                  'delta': 0.003, 'converged': True, 'gaps': [],
+                  'unresolved_gaps': 0, 'channels': {}},
+        },
+    }
+
+    records = []
+
+    class _Capture(_logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    handler = _Capture()
+    logger = _logging.getLogger('engine.probe_coordinator')
+    logger.addHandler(handler)
+    logger.setLevel(_logging.INFO)
+    try:
+        coord._tell_char_study(probe['param_name'], resp)
+    finally:
+        logger.removeHandler(handler)
+
+    per_recv = [m for m in records if 'CHAR TELL:' in m and
+                (' B ' in m or ' C ' in m)]
+    assert any('B' in m and '*' in m for m in per_recv), \
+        f"primary receiver B must be marked: {records}"
+    assert any('C' in m for m in per_recv), f"receiver C line missing: {records}"
+    assert any('conv=False' in m for m in per_recv) and \
+           any('conv=True' in m for m in per_recv), \
+        f"per-receiver convergence states missing: {records}"
+    print(f"  {len(per_recv)} per-receiver lines logged, primary marked")
+    print("  PASS")
+
+
 def test_get_char_status():
     """get_char_status returns structured per-param state."""
     print("\n=== test_get_char_status ===")

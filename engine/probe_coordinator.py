@@ -584,86 +584,6 @@ class ProbeCoordinator:
         except Exception as e:
             logger.warning(f"Failed to record receiver observation: {e}")
 
-    def _compute_probe_shift(self, probe: dict) -> Optional[float]:
-        """Compute receiver's coupling shift for the probe round just completed.
-
-        Reads receiver_observations written during this push/pause window.
-        Shift = median(receiver objective_0 during push) - median(during pause).
-
-        Returns None if insufficient receiver data.
-        """
-        if self._round_push_start is None or self._round_pause_end is None:
-            return None
-
-        push_start = self._round_push_start
-        pause_end = self._round_pause_end
-
-        def op(conn):
-            import json
-            cur = conn.cursor()
-            # Receiver observations during push window (lease_phase = probe_push)
-            cur.execute(
-                "SELECT objective_values FROM receiver_observations "
-                "WHERE group_id = %s AND receiver_id != %s "
-                "AND lease_phase = 'probe_push' "
-                "AND written_at >= %s AND written_at <= %s",
-                (self.group_id, self.breeder_id, push_start, pause_end)
-            )
-            push_vals = []
-            for (obj_json,) in cur.fetchall():
-                try:
-                    obj = json.loads(obj_json) if isinstance(obj_json, str) else obj_json
-                    v = obj.get('objective_0')
-                    if v is not None:
-                        push_vals.append(float(v))
-                except (json.JSONDecodeError, TypeError):
-                    pass
-
-            # Receiver observations during pause window (lease_phase = probe_pause)
-            cur.execute(
-                "SELECT objective_values FROM receiver_observations "
-                "WHERE group_id = %s AND receiver_id != %s "
-                "AND lease_phase = 'probe_pause' "
-                "AND written_at >= %s AND written_at <= %s",
-                (self.group_id, self.breeder_id, push_start, pause_end)
-            )
-            pause_vals = []
-            for (obj_json,) in cur.fetchall():
-                try:
-                    obj = json.loads(obj_json) if isinstance(obj_json, str) else obj_json
-                    v = obj.get('objective_0')
-                    if v is not None:
-                        pause_vals.append(float(v))
-                except (json.JSONDecodeError, TypeError):
-                    pass
-
-            cur.close()
-            return push_vals, pause_vals
-
-        try:
-            push_vals, pause_vals = self._db(op, "compute_probe_shift")
-        except Exception as e:
-            logger.warning(f"Failed to compute probe shift: {e}")
-            return None
-
-        if len(push_vals) < 2 or len(pause_vals) < 2:
-            logger.info(
-                f"SHIFT: insufficient receiver data "
-                f"(push={len(push_vals)}, pause={len(pause_vals)})"
-            )
-            return None
-
-        push_med = statistics.median(push_vals)
-        pause_med = statistics.median(pause_vals)
-        shift = push_med - pause_med
-
-        logger.info(
-            f"SHIFT: param={probe['param_name']} level={probe['level']} "
-            f"push_med={push_med:.4f} pause_med={pause_med:.4f} "
-            f"shift={shift:+.4f} (push_n={len(push_vals)}, pause_n={len(pause_vals)})"
-        )
-        return shift
-
     def _process_probe_result(self, probe: dict) -> Optional[dict]:
         """Called when a probe round (push + pause) completes.
 
@@ -822,8 +742,7 @@ class ProbeCoordinator:
                 f"CHAR TELL: {param_name} "
                 f"z={float(z):.3f} (delta={delta} "
                 f"drift={result.get('drift')} "
-                f"bar={result.get('shift_bar')})"
-            )
+                f"bar={result.get('shift_bar')})")
         elif delta is not None:
             # Older causal: delta with the INFINITY catch
             # (f64::MAX/2 ≈ 8.99e+307 → 1.0).
@@ -840,6 +759,27 @@ class ProbeCoordinator:
         else:
             logger.info(f"CHAR TELL: {param_name} FAIL (no z, no delta)")
             return
+
+        # Per-receiver detail when causal provides the receivers map
+        # (multi-receiver curves). Top-level fields are already the
+        # all-receiver aggregates — retirement consults those; these
+        # lines are the per-listener paper trail in Loki.
+        receivers = result.get('receivers')
+        if isinstance(receivers, dict) and receivers:
+            primary = result.get('primary_receiver')
+            for recv, rr in sorted(receivers.items()):
+                try:
+                    marker = '*' if recv == primary else ' '
+                    logger.info(
+                        f"CHAR TELL:{marker} {recv} "
+                        f"ch={rr.get('primary_channel')} "
+                        f"shift={float(rr.get('shift', 0.0)):+.4f} "
+                        f"z={float(rr.get('z', 0.0)):.3f} "
+                        f"conv={rr.get('converged')} "
+                        f"gaps={rr.get('unresolved_gaps')}"
+                    )
+                except (TypeError, ValueError):
+                    logger.info(f"CHAR TELL: {recv} (unparseable entry)")
 
         # Coverage check: can the walk still advance?
         if len(self._converged_params) < len(self._param_names):
