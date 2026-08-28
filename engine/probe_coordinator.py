@@ -379,7 +379,8 @@ class ProbeCoordinator:
             return result
         try:
             return self._db(op, "has_active_sender")
-        except Exception:
+        except Exception as e:
+            logger.error(f"COORDINATION DB FAILURE (has_active_sender): {e} — degrading, probe protocol compromised")
             return False
 
     def _get_lease_phase(self) -> Optional[str]:
@@ -398,7 +399,8 @@ class ProbeCoordinator:
             return row[0] if row else None
         try:
             return self._db(op, "get_lease_phase")
-        except Exception:
+        except Exception as e:
+            logger.error(f"COORDINATION DB FAILURE (get_lease_phase): {e} — degrading, probe protocol compromised")
             return None
 
     def _count_active_breeders(self) -> int:
@@ -415,7 +417,8 @@ class ProbeCoordinator:
             return count
         try:
             return self._db(op, "count_active_breeders")
-        except Exception:
+        except Exception as e:
+            logger.error(f"COORDINATION DB FAILURE (count_active_breeders): {e} — assuming solo; if peers exist, coordination is LOST")
             return 1
 
     # ─── Params ──────────────────────────────────────────────────────
