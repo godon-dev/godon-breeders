@@ -527,3 +527,67 @@ class TestExecuteTrialUsesRunRecon:
         recon_call = mock_wmill.run_script_by_path.call_args_list[1]
         assert recon_call[0][0] == 'f/reconnaissance/prometheus'
 
+
+class TestPublishStandingParams:
+    """Per-trial upsert of the breeder's applied params — the standing
+    dials causal stamps curve points with (the ambient of measurement)."""
+
+    def setup_method(self):
+        sys.modules['wmill'].reset_mock()
+
+    def test_upserts_params_json(self):
+        import json as _json
+        worker = _create_worker(interference_detection={'group': 'g1'})
+        cursor = MagicMock()
+        conn = MagicMock()
+        conn.cursor.return_value = cursor
+        worker._with_shared_db = lambda op, desc=None: op(conn)
+
+        worker._publish_standing_params({'param_0': 50.0})
+
+        sql, args = cursor.execute.call_args[0]
+        assert 'UPDATE interference_active_breeders' in sql
+        assert 'params = %s' in sql
+        assert 'last_seen = NOW()' in sql
+        assert _json.loads(args[0]) == {'param_0': 50.0}
+        assert args[1] == worker.breeder_id
+
+    def test_skips_without_detection_section(self):
+        worker = _create_worker()  # base config: pure optimizer
+        called = []
+        worker._with_shared_db = lambda op, desc=None: called.append(desc)
+
+        worker._publish_standing_params({'param_0': 50.0})
+
+        assert called == []
+
+    def test_skips_on_empty_params(self):
+        worker = _create_worker(interference_detection={'group': 'g1'})
+        called = []
+        worker._with_shared_db = lambda op, desc=None: called.append(desc)
+
+        worker._publish_standing_params({})
+
+        assert called == []
+
+
+class TestObservationPublishGate:
+    """Which trials publish their own readings: every trial with a
+    protocol phase in flight (receiver hold, sender push, sender
+    pause). Parked and optimizer trials publish nothing."""
+
+    def test_phase_discriminator(self):
+        gate = lambda d: d.get('lease_phase') or d.get('impulse_phase')
+
+        receiver_hold = {'mode': 'hold', 'lease_phase': 'probe_push'}
+        sender_push = {'mode': 'impulse', 'impulse_phase': 'probe_push'}
+        sender_pause = {'mode': 'hold', 'impulse_phase': 'probe_pause'}
+        parked = {'mode': 'hold'}
+        optimize = {'mode': 'optimize'}
+
+        assert gate(receiver_hold) == 'probe_push'
+        assert gate(sender_push) == 'probe_push'
+        assert gate(sender_pause) == 'probe_pause'
+        assert gate(parked) is None
+        assert gate(optimize) is None
+

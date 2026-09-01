@@ -835,13 +835,24 @@ def test_hold_return_carries_lease_phase():
     assert decision.get('lease_phase') == 'probe_push'
 
 def test_write_gate_discriminates_sender_self_reads():
-    """The exact worker gate: receiver HOLD rows written, sender pause
-    rows (mode 'hold', no phase) rejected."""
+    """Publication vs consumption are separate gates now. The worker
+    publishes every phased trial's own readings (receiver holds AND
+    sender push/pause — the self-curve data); causal's receiver query
+    keeps the walking sender's rows out of its receivers' shift
+    medians by receiver_id (the run-23 poison protection, which
+    attribution by receiver_id makes permanent)."""
+    publish_gate = lambda d: d.get('lease_phase') or d.get('impulse_phase')
     receiver_decision = {'mode': 'hold', 'lease_phase': 'probe_pause'}
-    sender_pause_decision = {'mode': 'hold', 'lease_phase': None}
-    gate = lambda d: d['mode'] == 'hold' and d.get('lease_phase') is not None
-    assert gate(receiver_decision) is True
-    assert gate(sender_pause_decision) is False
+    sender_pause_decision = {'mode': 'hold', 'impulse_phase': 'probe_pause'}
+
+    assert publish_gate(receiver_decision) == 'probe_pause'
+    assert publish_gate(sender_pause_decision) == 'probe_pause'
+
+    receiver_query = lambda row, sender: (
+        row['receiver_id'] != sender and row['lease_phase'] is not None
+    )
+    assert receiver_query({'receiver_id': 'other', 'lease_phase': 'probe_push'}, 'sender') is True
+    assert receiver_query({'receiver_id': 'sender', 'lease_phase': 'probe_push'}, 'sender') is False
 
 
 # ─── Park at neutral (quiescence outside push blocks) ──────────────

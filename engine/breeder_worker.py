@@ -390,6 +390,13 @@ class BreederWorker:
                     "ALTER TABLE interference_active_breeders "
                     "ADD COLUMN IF NOT EXISTS group_id VARCHAR(255) NOT NULL DEFAULT 'default'"
                 )
+            # Standing dials: this breeder's applied params, refreshed per
+            # trial. Read by causal to stamp curve points with the ambient
+            # they were measured under.
+            cur.execute(
+                "ALTER TABLE interference_active_breeders "
+                "ADD COLUMN IF NOT EXISTS params JSONB"
+            )
             cur.execute(
                 "INSERT INTO interference_active_breeders (breeder_id, group_id, last_seen) "
                 "VALUES (%s, %s, NOW()) ON CONFLICT (breeder_id) DO UPDATE "
@@ -401,6 +408,29 @@ class BreederWorker:
             self._with_shared_db(op, "register_interference_breeder")
         except Exception as e:
             logger.warning(f"Failed to register for interference detection: {e}")
+
+    def _publish_standing_params(self, params):
+        """Refresh this breeder's applied params in the heartbeat table.
+
+        Per-trial UPDATE of the standing dials. The row itself is
+        created by registration; this only ever updates, so it can
+        never create ghost breeders.
+        """
+        det_cfg = self.config.get('interference_detection', self.config.get('detection', {}))
+        if not det_cfg or not params:
+            return
+        def op(conn):
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE interference_active_breeders "
+                "SET params = %s, last_seen = NOW() WHERE breeder_id = %s",
+                (json.dumps(params), self.breeder_id)
+            )
+            cur.close()
+        try:
+            self._with_shared_db(op, 'publish_standing_params')
+        except Exception as e:
+            logger.warning(f'Failed to publish standing params: {e}')
 
     def _heartbeat_interference(self):
         if time.time() - self._last_heartbeat_ts < self._heartbeat_interval:
@@ -1113,15 +1143,20 @@ class BreederWorker:
 
                         # Stash effectuation params BEFORE study.tell — trial is frozen after tell
                         trial.set_user_attr('effectuation_params', json.dumps(params))
+                        self._publish_standing_params(params)
 
-                        # If receiver HOLD trial: write observations to shared table.
-                        # lease_phase gate: only the receiver's HOLD carries the
-                        # observed phase; the sender's pause parks return mode
-                        # 'hold' WITHOUT a phase — those are the sender's own
-                        # node self-reads and must never enter the receiver
-                        # table (they poisoned shift medians as ~0.5 rows).
-                        if (detection_mode == 'hold'
-                                and decision.get('lease_phase') is not None
+                        # Publish this trial's own readings to the shared
+                        # table whenever a protocol phase was in flight:
+                        # receivers holding (lease_phase = the phase they
+                        # observed) and the sender's own push/pause trials
+                        # (impulse_phase). Every row is the writer's own
+                        # node self-read, attributed by receiver_id —
+                        # causal's per-receiver filters keep the sender's
+                        # rows out of receiver shift medians (the run-23
+                        # poison fix) and select them as self-curve data.
+                        # Parked/idle trials publish nothing.
+                        obs_phase = decision.get('lease_phase') or decision.get('impulse_phase')
+                        if (obs_phase is not None
                                 and hasattr(self._probe_coordinator, 'record_receiver_observation')):
                             # Record every metric the recon read this trial —
                             # objectives AND watched observations. Channels on
@@ -1137,7 +1172,7 @@ class BreederWorker:
                                 self._probe_coordinator.record_receiver_observation(
                                     trial_num=trial.number,
                                     objective_values=obj_readings,
-                                    lease_phase=decision.get('lease_phase'),
+                                    lease_phase=obs_phase,
                                 )
 
                         self._retry_op(
