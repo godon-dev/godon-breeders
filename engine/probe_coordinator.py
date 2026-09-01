@@ -46,9 +46,11 @@ States:
   COOLDOWN    — Wait before re-acquiring (turn-taking fairness)
   HOLD        — Receiver: hold neutral while sender probes
 
-  With park_at_neutral set, DONE/COOLDOWN/idle trials also apply the
-  neutral hold params — the optimizer drives params only inside a
-  push block.
+  Protocol participants park at neutral whenever they are not
+  pushing: DONE, cooldowns, idle waiting and hold exits all apply
+  the neutral hold params — the optimizer drives params only inside
+  a push block. A breeder without an interference_detection section
+  is a pure optimizer; the coordinator passes through.
 
 Coordination: group-scoped fencing-token lease in shared DB.
 One sender at a time per group. Crash recovery via heartbeat staleness.
@@ -110,11 +112,12 @@ class ProbeCoordinator:
         self.push_block_size = det_cfg.get('push_block_size', 10)
         self.pause_block_size = det_cfg.get('pause_block_size', 10)
         self.cooldown_trials = det_cfg.get('cooldown_trials', 5)
-        # When true, every state except an active push block applies the
-        # neutral hold params: finished walkers, cooldown gaps and idle
-        # breeders park instead of applying optimizer-suggested params.
-        # Default false keeps legacy behavior bit-identical.
-        self.park_at_neutral = bool(det_cfg.get('park_at_neutral', False))
+        # Protocol participation is derived, not configured: a breeder
+        # with an interference_detection/detection section joins the
+        # probe protocol and parks at neutral whenever it is not
+        # pushing. A breeder without the section is a pure optimizer —
+        # the coordinator passes through.
+        self._coordination_enabled = bool(det_cfg)
         self.active_breeder_window = det_cfg.get(
             'active_breeder_window', self.ACTIVE_BREEDER_WINDOW_SECONDS)
 
@@ -899,7 +902,7 @@ class ProbeCoordinator:
 
         # A finished walk never re-acquires: acquire → ask → None → DONE
         # would loop, starving the group's remaining walkers.
-        if self.park_at_neutral and not self._walk_pending():
+        if not self._walk_pending():
             return self._park_result('walk complete')
 
         # Try to become sender
@@ -935,7 +938,7 @@ class ProbeCoordinator:
         return {'mode': 'hold', 'params': dict(params), 'detection_trial': False}
 
     def _idle_result(self) -> Dict[str, Any]:
-        if self.park_at_neutral:
+        if self._coordination_enabled:
             return self._park_result('idle')
         return self._optimize_result()
 
@@ -1037,9 +1040,7 @@ class ProbeCoordinator:
             f"DONE: released lease. "
             f"Converged {n_converged}/{n_total} params."
         )
-        if self.park_at_neutral:
-            return self._park_result('done')
-        return self._optimize_result()
+        return self._idle_result()
 
     # ── COOLDOWN ─────────────────────────────────────────────────────
 
@@ -1050,7 +1051,7 @@ class ProbeCoordinator:
                 p for p in self._param_names
                 if p not in self._converged_params
             ]
-            if non_converged and (not self.park_at_neutral or self._walk_pending()):
+            if non_converged and self._walk_pending():
                 logger.info("COOLDOWN: done — re-acquiring for more probes")
                 if self._try_acquire_lease(self.PROBE_PUSH):
                     self.state = self.PROBE_PUSH
