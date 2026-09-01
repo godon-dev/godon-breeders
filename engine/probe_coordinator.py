@@ -46,6 +46,10 @@ States:
   COOLDOWN    — Wait before re-acquiring (turn-taking fairness)
   HOLD        — Receiver: hold neutral while sender probes
 
+  With park_at_neutral set, DONE/COOLDOWN/idle trials also apply the
+  neutral hold params — the optimizer drives params only inside a
+  push block.
+
 Coordination: group-scoped fencing-token lease in shared DB.
 One sender at a time per group. Crash recovery via heartbeat staleness.
 """
@@ -106,6 +110,11 @@ class ProbeCoordinator:
         self.push_block_size = det_cfg.get('push_block_size', 10)
         self.pause_block_size = det_cfg.get('pause_block_size', 10)
         self.cooldown_trials = det_cfg.get('cooldown_trials', 5)
+        # When true, every state except an active push block applies the
+        # neutral hold params: finished walkers, cooldown gaps and idle
+        # breeders park instead of applying optimizer-suggested params.
+        # Default false keeps legacy behavior bit-identical.
+        self.park_at_neutral = bool(det_cfg.get('park_at_neutral', False))
         self.active_breeder_window = det_cfg.get(
             'active_breeder_window', self.ACTIVE_BREEDER_WINDOW_SECONDS)
 
@@ -846,7 +855,7 @@ class ProbeCoordinator:
             if not self._heartbeat():
                 logger.warning("Lost sender lease — returning to OPTIMIZE")
                 self.state = self.OPTIMIZE
-                return {'mode': 'optimize', 'params': None, 'detection_trial': False}
+                return self._idle_result()
 
         if self.state == self.OPTIMIZE:
             return self._handle_optimize(trial)
@@ -863,7 +872,7 @@ class ProbeCoordinator:
 
         logger.warning(f"Unknown state {self.state} — resetting to OPTIMIZE")
         self.state = self.OPTIMIZE
-        return {'mode': 'optimize', 'params': None, 'detection_trial': False}
+        return self._idle_result()
 
     # ── OPTIMIZE ─────────────────────────────────────────────────────
 
@@ -880,13 +889,18 @@ class ProbeCoordinator:
             return self._handle_hold(trial)
 
         if self._count_active_breeders() < 2:
-            return self._optimize_result()
+            return self._idle_result()
 
         # Initialize characterization walk on first entry
         if self._char_walk is None:
             self._init_characterization()
             if self._char_walk is None:
-                return self._optimize_result()
+                return self._idle_result()
+
+        # A finished walk never re-acquires: acquire → ask → None → DONE
+        # would loop, starving the group's remaining walkers.
+        if self.park_at_neutral and not self._walk_pending():
+            return self._park_result('walk complete')
 
         # Try to become sender
         if self._try_acquire_lease(self.PROBE_PUSH):
@@ -902,10 +916,36 @@ class ProbeCoordinator:
             self._hold_count = 0
             return self._handle_hold(trial)
 
-        return self._optimize_result()
+        return self._idle_result()
 
     def _optimize_result(self) -> Dict[str, Any]:
         return {'mode': 'optimize', 'params': None, 'detection_trial': False}
+
+    def _park_result(self, why: str) -> Dict[str, Any]:
+        """Parked trial: hold neutral, no lease phase.
+
+        Same shape as the sender's pause parks — never carries
+        lease_phase, so the worker's receiver-write gate keeps these
+        trials out of receiver_observations.
+        """
+        params = self._get_neutral_params()
+        if not params:
+            logger.warning(f"PARK ({why}): no neutral params — optimizing instead")
+            return self._optimize_result()
+        return {'mode': 'hold', 'params': dict(params), 'detection_trial': False}
+
+    def _idle_result(self) -> Dict[str, Any]:
+        if self.park_at_neutral:
+            return self._park_result('idle')
+        return self._optimize_result()
+
+    def _walk_pending(self) -> bool:
+        """Non-advancing check: can the walk still produce a probe for
+        unconverged params at the current refinement floor?"""
+        return bool(
+            self._char_walk is not None
+            and self._char_walk.can_probe(self._converged_params)
+        )
 
     # ── PROBE_PUSH (sender) ──────────────────────────────────────────
 
@@ -997,7 +1037,9 @@ class ProbeCoordinator:
             f"DONE: released lease. "
             f"Converged {n_converged}/{n_total} params."
         )
-        return {'mode': 'optimize', 'params': None, 'detection_trial': False}
+        if self.park_at_neutral:
+            return self._park_result('done')
+        return self._optimize_result()
 
     # ── COOLDOWN ─────────────────────────────────────────────────────
 
@@ -1008,7 +1050,7 @@ class ProbeCoordinator:
                 p for p in self._param_names
                 if p not in self._converged_params
             ]
-            if non_converged:
+            if non_converged and (not self.park_at_neutral or self._walk_pending()):
                 logger.info("COOLDOWN: done — re-acquiring for more probes")
                 if self._try_acquire_lease(self.PROBE_PUSH):
                     self.state = self.PROBE_PUSH
@@ -1016,7 +1058,7 @@ class ProbeCoordinator:
                     return self._handle_probe_push(trial)
             logger.info("COOLDOWN: done — back to OPTIMIZE")
             self.state = self.OPTIMIZE
-        return {'mode': 'optimize', 'params': None, 'detection_trial': False}
+        return self._idle_result()
 
     # ── HOLD (receiver) ──────────────────────────────────────────────
 
@@ -1024,7 +1066,7 @@ class ProbeCoordinator:
         if not self._has_active_sender():
             logger.info("HOLD: sender finished — back to OPTIMIZE")
             self.state = self.OPTIMIZE
-            return {'mode': 'optimize', 'params': None, 'detection_trial': False}
+            return self._idle_result()
 
         self._hold_count += 1
         if self._hold_count > self.MAX_HOLD_TRIALS:
@@ -1033,12 +1075,12 @@ class ProbeCoordinator:
                 f"returning to OPTIMIZE"
             )
             self.state = self.OPTIMIZE
-            return {'mode': 'optimize', 'params': None, 'detection_trial': False}
+            return self._idle_result()
 
         params = self._get_neutral_params()
         if not params:
             self.state = self.OPTIMIZE
-            return {'mode': 'optimize', 'params': None, 'detection_trial': False}
+            return self._idle_result()
 
         phase = self._get_lease_phase()
         if self._hold_count % 5 == 1 or phase != getattr(self, '_last_observed_phase', None):
