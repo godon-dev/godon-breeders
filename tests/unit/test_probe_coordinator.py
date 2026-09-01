@@ -847,17 +847,18 @@ def test_write_gate_discriminates_sender_self_reads():
 # ─── Park at neutral (quiescence outside push blocks) ──────────────
 
 def _parked_coord(**overrides):
-    """Coordinator with park_at_neutral on and a live coverage walk."""
-    coord = _make_coordinator(park_at_neutral=True, **overrides)
+    """Protocol participant (interference_detection present) with a
+    live coverage walk."""
+    coord = _make_coordinator(**overrides)
     coord._init_characterization()
     return coord
 
 
-def test_done_parks_at_neutral_when_enabled():
+def test_done_parks_at_neutral():
     """A finished walker parks: DONE returns hold-at-neutral, not the
     optimizer's next suggestion (dense run 33172249837: A stood at 100
     for C's whole walk after finishing)."""
-    print("\n=== test_done_parks_at_neutral_when_enabled ===")
+    print("\n=== test_done_parks_at_neutral ===")
     coord = _parked_coord()
     coord.state = coord.PROBE_PUSH
     coord._push_count = 0
@@ -871,18 +872,18 @@ def test_done_parks_at_neutral_when_enabled():
     print("  PASS")
 
 
-def test_done_optimizes_when_park_disabled():
-    """Default off: DONE returns optimizer mode, bit-identical legacy."""
-    print("\n=== test_done_optimizes_when_park_disabled ===")
-    coord = _make_coordinator()
-    coord._init_characterization()
-    coord.state = coord.PROBE_PUSH
-    coord._push_count = 0
-    coord._converged_params = {'param_0', 'param_1', 'param_2'}
-    result = coord._handle_probe_push(types.SimpleNamespace(number=1))
-    assert coord.state == coord.COOLDOWN
+def test_pure_optimizer_passes_through():
+    """A breeder without an interference_detection section is a pure
+    optimizer: the coordinator passes through, it never parks."""
+    print("\n=== test_pure_optimizer_passes_through ===")
+    cfg = _config()
+    del cfg['interference_detection']
+    coord = _make_coordinator(config=cfg)
+    assert coord._coordination_enabled is False
+    coord._count_active_breeders = lambda: 1
+    result = coord._handle_optimize(types.SimpleNamespace(number=1))
     assert result == {'mode': 'optimize', 'params': None, 'detection_trial': False}
-    print("  DONE → optimize/None (legacy unchanged)")
+    print("  no section → optimize pass-through, no park")
     print("  PASS")
 
 
@@ -904,10 +905,10 @@ def test_walk_complete_does_not_reacquire_lease():
     print("  PASS")
 
 
-def test_solo_breeder_parks_when_enabled():
-    """Waiting for the group (< 2 active breeders) parks instead of
+def test_solo_protocol_breeder_parks():
+    """A protocol participant waiting for its group parks instead of
     wandering under the optimizer."""
-    print("\n=== test_solo_breeder_parks_when_enabled ===")
+    print("\n=== test_solo_protocol_breeder_parks ===")
     coord = _parked_coord()
     coord._count_active_breeders = lambda: 1
     result = coord._handle_optimize(types.SimpleNamespace(number=1))
@@ -968,10 +969,10 @@ def test_cooldown_expiry_with_finished_walk_parks():
     print("  PASS")
 
 
-def test_hold_exit_parks_when_enabled():
+def test_hold_exit_parks():
     """A receiver leaving HOLD (sender finished) parks through the
     handoff instead of applying one optimizer trial."""
-    print("\n=== test_hold_exit_parks_when_enabled ===")
+    print("\n=== test_hold_exit_parks ===")
     coord = _parked_coord()
     coord.state = coord.HOLD
     coord._db = lambda op, desc=None: False  # no active sender
