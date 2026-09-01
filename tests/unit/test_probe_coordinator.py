@@ -844,6 +844,157 @@ def test_write_gate_discriminates_sender_self_reads():
     assert gate(sender_pause_decision) is False
 
 
+# ─── Park at neutral (quiescence outside push blocks) ──────────────
+
+def _parked_coord(**overrides):
+    """Coordinator with park_at_neutral on and a live coverage walk."""
+    coord = _make_coordinator(park_at_neutral=True, **overrides)
+    coord._init_characterization()
+    return coord
+
+
+def test_done_parks_at_neutral_when_enabled():
+    """A finished walker parks: DONE returns hold-at-neutral, not the
+    optimizer's next suggestion (dense run 33172249837: A stood at 100
+    for C's whole walk after finishing)."""
+    print("\n=== test_done_parks_at_neutral_when_enabled ===")
+    coord = _parked_coord()
+    coord.state = coord.PROBE_PUSH
+    coord._push_count = 0
+    coord._converged_params = {'param_0', 'param_1', 'param_2'}  # ask → None
+    result = coord._handle_probe_push(types.SimpleNamespace(number=1))
+    assert coord.state == coord.COOLDOWN
+    assert result['mode'] == 'hold', f"expected park, got {result}"
+    assert result['params'] == {'param_0': 50.0, 'param_1': 50.0, 'param_2': 50.0}
+    assert 'lease_phase' not in result, "parks must stay out of receiver rows"
+    print("  DONE → hold@50, no lease_phase, state COOLDOWN")
+    print("  PASS")
+
+
+def test_done_optimizes_when_park_disabled():
+    """Default off: DONE returns optimizer mode, bit-identical legacy."""
+    print("\n=== test_done_optimizes_when_park_disabled ===")
+    coord = _make_coordinator()
+    coord._init_characterization()
+    coord.state = coord.PROBE_PUSH
+    coord._push_count = 0
+    coord._converged_params = {'param_0', 'param_1', 'param_2'}
+    result = coord._handle_probe_push(types.SimpleNamespace(number=1))
+    assert coord.state == coord.COOLDOWN
+    assert result == {'mode': 'optimize', 'params': None, 'detection_trial': False}
+    print("  DONE → optimize/None (legacy unchanged)")
+    print("  PASS")
+
+
+def test_walk_complete_does_not_reacquire_lease():
+    """A converged walk never re-acquires: acquire → ask → None → DONE
+    loops and starves the group's remaining walkers (A's optimize↔
+    cooldown flip-flop 13:05–13:15 in the dense run)."""
+    print("\n=== test_walk_complete_does_not_reacquire_lease ===")
+    from unittest.mock import patch
+    coord = _parked_coord()
+    coord._converged_params = {'param_0', 'param_1', 'param_2'}
+    coord._count_active_breeders = lambda: 3
+    coord._has_active_sender = lambda: False
+    with patch.object(coord, '_try_acquire_lease', return_value=True) as acq:
+        result = coord._handle_optimize(types.SimpleNamespace(number=5))
+    acq.assert_not_called()
+    assert result['mode'] == 'hold', f"expected park, got {result}"
+    print("  walk complete → no acquire, parked")
+    print("  PASS")
+
+
+def test_solo_breeder_parks_when_enabled():
+    """Waiting for the group (< 2 active breeders) parks instead of
+    wandering under the optimizer."""
+    print("\n=== test_solo_breeder_parks_when_enabled ===")
+    coord = _parked_coord()
+    coord._count_active_breeders = lambda: 1
+    result = coord._handle_optimize(types.SimpleNamespace(number=1))
+    assert result['mode'] == 'hold'
+    assert result['params'] == {'param_0': 50.0, 'param_1': 50.0, 'param_2': 50.0}
+    print("  solo → hold@50")
+    print("  PASS")
+
+
+def test_cooldown_parks_between_trials():
+    """Cooldown-gap trials park — the handoff window between one walker's
+    DONE and the next's acquire injects no optimizer application."""
+    print("\n=== test_cooldown_parks_between_trials ===")
+    coord = _parked_coord(cooldown_trials=3)
+    coord.state = coord.COOLDOWN
+    coord._cooldown_count = 0
+    result = coord._handle_cooldown(types.SimpleNamespace(number=1))
+    assert coord.state == coord.COOLDOWN
+    assert result['mode'] == 'hold'
+    assert result['params'] == {'param_0': 50.0, 'param_1': 50.0, 'param_2': 50.0}
+    assert 'lease_phase' not in result
+    print("  cooldown gap → hold@50")
+    print("  PASS")
+
+
+def test_cooldown_reacquires_when_work_remains():
+    """Parking does not break turn-taking: cooldown expiry with
+    unconverged params and a pending walk still re-acquires."""
+    print("\n=== test_cooldown_reacquires_when_work_remains ===")
+    from unittest.mock import patch
+    coord = _parked_coord(cooldown_trials=1)
+    coord.state = coord.COOLDOWN
+    coord._cooldown_count = 0
+    with patch.object(coord, '_try_acquire_lease', return_value=True) as acq:
+        result = coord._handle_cooldown(types.SimpleNamespace(number=1))
+    acq.assert_called_once()
+    assert coord.state == coord.PROBE_PUSH
+    assert result['mode'] == 'impulse'
+    print("  expiry with work → acquire → push")
+    print("  PASS")
+
+
+def test_cooldown_expiry_with_finished_walk_parks():
+    """Expiry with a finished walk parks instead of entering the
+    acquire loop."""
+    print("\n=== test_cooldown_expiry_with_finished_walk_parks ===")
+    from unittest.mock import patch
+    coord = _parked_coord(cooldown_trials=1)
+    coord._converged_params = {'param_0', 'param_1', 'param_2'}
+    coord.state = coord.COOLDOWN
+    coord._cooldown_count = 0
+    with patch.object(coord, '_try_acquire_lease', return_value=True) as acq:
+        result = coord._handle_cooldown(types.SimpleNamespace(number=1))
+    acq.assert_not_called()
+    assert coord.state == coord.OPTIMIZE
+    assert result['mode'] == 'hold'
+    print("  expiry, walk done → parked, no acquire")
+    print("  PASS")
+
+
+def test_hold_exit_parks_when_enabled():
+    """A receiver leaving HOLD (sender finished) parks through the
+    handoff instead of applying one optimizer trial."""
+    print("\n=== test_hold_exit_parks_when_enabled ===")
+    coord = _parked_coord()
+    coord.state = coord.HOLD
+    coord._db = lambda op, desc=None: False  # no active sender
+    result = coord._handle_hold(types.SimpleNamespace(number=1))
+    assert coord.state == coord.OPTIMIZE
+    assert result['mode'] == 'hold'
+    assert result['params'] == {'param_0': 50.0, 'param_1': 50.0, 'param_2': 50.0}
+    print("  hold exit → hold@50 through the gap")
+    print("  PASS")
+
+
+def test_park_falls_back_when_no_neutral_params():
+    """No neutral params available → park degrades to the legacy
+    optimize return instead of failing the trial."""
+    print("\n=== test_park_falls_back_when_no_neutral_params ===")
+    coord = _parked_coord()
+    coord._get_neutral_params = lambda: None
+    result = coord._park_result('test')
+    assert result == {'mode': 'optimize', 'params': None, 'detection_trial': False}
+    print("  no neutral → optimize fallback")
+    print("  PASS")
+
+
 # ─── Priced stop: two-key retirement ───────────────────────────────
 
 def _probe_result(converged=True, gaps=None, shift_bar=0.05):
