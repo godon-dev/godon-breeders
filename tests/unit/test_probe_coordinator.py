@@ -1085,21 +1085,21 @@ def test_record_includes_watched_observations():
     assert readings == {'objective_0': 0.51, 'objective_1': 0.34}
 
 
-def test_acquire_sql_carries_last_holder_backoff():
-    """Lease fairness (seed-47 starved self-map): the acquire SQL must deny
-    the breeder that just released the lease, for the backoff window, so
-    peers get their walk turns."""
-    print("\n=== test_acquire_sql_carries_last_holder_backoff ===")
-    import types as _types
 
+def test_acquire_publishes_demand_and_carries_fair_share_guard():
+    """Lease fairness (seed-47 starved self-map): acquire publishes this
+    breeder's walk demand, then denies itself while a walk-pending peer
+    has had fewer turns. Poll speed cannot beat the count."""
+    print("\n=== test_acquire_publishes_demand_and_carries_fair_share_guard ===")
     coord = _parked_coord()
-    captured = {}
+    coord._walk_pending = lambda: True
+    captured = {"sql": [], "params": []}
 
     class _Cur:
         rowcount = 1
         def execute(self, sql, params=None):
-            captured.setdefault("sql", []).append(sql)
-            captured.setdefault("params", []).append(params)
+            captured["sql"].append(sql)
+            captured["params"].append(params)
         def fetchone(self):
             return (7,)
         def close(self):
@@ -1117,29 +1117,41 @@ def test_acquire_sql_carries_last_holder_backoff():
 
     assert coord._try_acquire_lease(coord.PROBE_PUSH) is True
 
-    sql, params = captured["sql"][0], captured["params"][0]
-    assert "last_holder = %s" in sql, "deny clause missing from acquire SQL"
-    assert "AND NOT (" in sql, "deny wrapper missing from acquire SQL"
-    assert "released_at > NOW()" in sql or "released_at" in sql, "release time check missing"
-    # params: (breeder_id, phase, group_id, breeder_id) — breeder_id twice:
-    # holder value + last_holder deny comparison
-    assert params[0] == coord.breeder_id and params[-1] == coord.breeder_id
-    print("  acquire SQL denies last holder within backoff window")
+    pub_sql, pub_params = captured["sql"][0], captured["params"][0]
+    assert "interference_active_breeders" in pub_sql
+    assert "walk_pending" in pub_sql
+    assert pub_params[0] is True
+
+    lease_sql, lease_params = captured["sql"][1], captured["params"][1]
+    assert "NOT EXISTS" in lease_sql, "fair-share guard missing"
+    assert "walk_pending IS TRUE" in lease_sql, "demand filter missing"
+    assert "acquire_count" in lease_sql, "turn-count comparison missing"
+    # params: (bid, want, bid, phase, gid, gid, bid, gid, bid)
+    assert lease_params[-1] == coord.breeder_id
+    assert lease_params[0] == coord.breeder_id
+
+    bump_sql = captured["sql"][3]
+    assert "acquire_count = COALESCE(acquire_count, 0) + 1" in bump_sql
+    assert captured["params"][3] == (coord.breeder_id,)
+    print("  demand published; fair-share guard present; turn counted")
     print("  PASS")
 
 
-def test_release_stamps_last_holder_and_time():
-    """Lease fairness: releasing must stamp last_holder + released_at so the
-    acquire deny clause knows who just held the lease."""
-    print("\n=== test_release_stamps_last_holder_and_time ===")
+def test_acquire_without_demand_still_counts_turn():
+    """A walker with no remaining demand can still take the lease (park
+    completion path), and its turn still counts."""
+    print("\n=== test_acquire_without_demand_still_counts_turn ===")
     coord = _parked_coord()
-    coord._lease_token = 7
-    captured = {}
+    coord._walk_pending = lambda: False
+    seen = {"walk": None}
 
     class _Cur:
+        rowcount = 1
         def execute(self, sql, params=None):
-            captured["sql"] = sql
-            captured["params"] = params
+            if "SET walk_pending" in sql:
+                seen["walk"] = params[0]
+        def fetchone(self):
+            return (7,)
         def close(self):
             pass
 
@@ -1152,10 +1164,8 @@ def test_release_stamps_last_holder_and_time():
             return False
 
     coord._db = lambda fn, desc=None: fn(_Conn())
-    coord._release_lease()
 
-    assert "last_holder = %s" in captured["sql"], "release does not stamp last_holder"
-    assert "released_at = NOW()" in captured["sql"], "release does not stamp released_at"
-    assert captured["params"][0] == coord.breeder_id
-    print("  release stamps last_holder + released_at")
+    assert coord._try_acquire_lease(coord.PROBE_PUSH) is True
+    assert seen["walk"] is False
+    print("  demand=False published; lease acquired; turn counted")
     print("  PASS")
