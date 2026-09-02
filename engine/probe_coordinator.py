@@ -91,6 +91,12 @@ class ProbeCoordinator:
     MAX_HOLD_TRIALS = 200
     ACTIVE_BREEDER_WINDOW_SECONDS = 360
 
+    # Lease fairness: a breeder that just released the sender lease waits
+    # this long before re-acquiring, so peers get their walk turns.
+    LEASE_REACQUIRE_BACKOFF_SECONDS = int(
+        os.environ.get('GODON_LEASE_REACQUIRE_BACKOFF_SECONDS', '20')
+    )
+
     def __init__(
         self,
         breeder_id: str,
@@ -203,9 +209,21 @@ class ProbeCoordinator:
                     phase VARCHAR(50),
                     push_remaining INT DEFAULT 0,
                     pause_remaining INT DEFAULT 0,
-                    last_heartbeat TIMESTAMPTZ
+                    last_heartbeat TIMESTAMPTZ,
+                    last_holder VARCHAR(255),
+                    released_at TIMESTAMPTZ
                 )
             """)
+            cur.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'sender_lease' AND column_name = 'last_holder'"
+            )
+            if not cur.fetchone():
+                cur.execute(
+                    "ALTER TABLE sender_lease "
+                    "ADD COLUMN IF NOT EXISTS last_holder VARCHAR(255), "
+                    "ADD COLUMN IF NOT EXISTS released_at TIMESTAMPTZ"
+                )
             cur.execute(
                 "INSERT INTO sender_lease "
                 "(group_id, holder, token, phase, push_remaining, pause_remaining, last_heartbeat) "
@@ -274,6 +292,8 @@ class ProbeCoordinator:
 
     def _try_acquire_lease(self, phase: str) -> bool:
         stale = self._stale_interval()
+        backoff = str(self.LEASE_REACQUIRE_BACKOFF_SECONDS)
+
         def op(conn):
             cur = conn.cursor()
             cur.execute(
@@ -285,8 +305,12 @@ class ProbeCoordinator:
                 "holder IS NULL "
                 "OR last_heartbeat IS NULL "
                 "OR last_heartbeat < NOW() - INTERVAL '" + stale + " seconds'"
+                ") "
+                "AND NOT ("
+                "last_holder = %s "
+                "AND released_at > NOW() - INTERVAL '" + backoff + " seconds'"
                 ")",
-                (self.breeder_id, phase, self.group_id)
+                (self.breeder_id, phase, self.group_id, self.breeder_id)
             )
             updated = cur.rowcount
             if updated > 0:
@@ -324,9 +348,10 @@ class ProbeCoordinator:
             cur.execute(
                 "UPDATE sender_lease "
                 "SET holder = NULL, phase = NULL, "
-                "push_remaining = 0, pause_remaining = 0 "
+                "push_remaining = 0, pause_remaining = 0, "
+                "last_holder = %s, released_at = NOW() "
                 "WHERE group_id = %s AND holder = %s AND token = %s",
-                (self.group_id, self.breeder_id, self._lease_token)
+                (self.breeder_id, self.group_id, self.breeder_id, self._lease_token)
             )
             cur.close()
         try:

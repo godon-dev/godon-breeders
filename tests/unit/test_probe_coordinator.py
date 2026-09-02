@@ -1083,3 +1083,79 @@ def test_record_includes_watched_observations():
             if oname in metrics and oname not in readings:
                 readings[oname] = metrics[oname]
     assert readings == {'objective_0': 0.51, 'objective_1': 0.34}
+
+
+def test_acquire_sql_carries_last_holder_backoff():
+    """Lease fairness (seed-47 starved self-map): the acquire SQL must deny
+    the breeder that just released the lease, for the backoff window, so
+    peers get their walk turns."""
+    print("\n=== test_acquire_sql_carries_last_holder_backoff ===")
+    import types as _types
+
+    coord = _parked_coord()
+    captured = {}
+
+    class _Cur:
+        rowcount = 1
+        def execute(self, sql, params=None):
+            captured.setdefault("sql", []).append(sql)
+            captured.setdefault("params", []).append(params)
+        def fetchone(self):
+            return (7,)
+        def close(self):
+            pass
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    coord._db = lambda fn, desc=None: fn(_Conn())
+
+    assert coord._try_acquire_lease(coord.PROBE_PUSH) is True
+
+    sql, params = captured["sql"][0], captured["params"][0]
+    assert "last_holder = %s" in sql, "deny clause missing from acquire SQL"
+    assert "AND NOT (" in sql, "deny wrapper missing from acquire SQL"
+    assert "released_at > NOW()" in sql or "released_at" in sql, "release time check missing"
+    # params: (breeder_id, phase, group_id, breeder_id) — breeder_id twice:
+    # holder value + last_holder deny comparison
+    assert params[0] == coord.breeder_id and params[-1] == coord.breeder_id
+    print("  acquire SQL denies last holder within backoff window")
+    print("  PASS")
+
+
+def test_release_stamps_last_holder_and_time():
+    """Lease fairness: releasing must stamp last_holder + released_at so the
+    acquire deny clause knows who just held the lease."""
+    print("\n=== test_release_stamps_last_holder_and_time ===")
+    coord = _parked_coord()
+    coord._lease_token = 7
+    captured = {}
+
+    class _Cur:
+        def execute(self, sql, params=None):
+            captured["sql"] = sql
+            captured["params"] = params
+        def close(self):
+            pass
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    coord._db = lambda fn, desc=None: fn(_Conn())
+    coord._release_lease()
+
+    assert "last_holder = %s" in captured["sql"], "release does not stamp last_holder"
+    assert "released_at = NOW()" in captured["sql"], "release does not stamp released_at"
+    assert captured["params"][0] == coord.breeder_id
+    print("  release stamps last_holder + released_at")
+    print("  PASS")
