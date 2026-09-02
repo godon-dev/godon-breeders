@@ -315,7 +315,7 @@ class ProbeCoordinator:
                 "WHERE group_id = %s AND breeder_id = %s"
                 "), 0)"
                 ")",
-                (self.breeder_id, want, self.breeder_id, phase,
+                (self.breeder_id, phase,
                  self.group_id, self.group_id, self.breeder_id,
                  self.group_id, self.breeder_id)
             )

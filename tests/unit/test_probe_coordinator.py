@@ -1129,6 +1129,10 @@ def test_acquire_publishes_demand_and_carries_fair_share_guard():
     # params: (bid, want, bid, phase, gid, gid, bid, gid, bid)
     assert lease_params[-1] == coord.breeder_id
     assert lease_params[0] == coord.breeder_id
+    # regression (seed-47-fair incident): params count must equal
+    # placeholder count — a mismatch fails every acquire at runtime
+    assert lease_params.__len__() == lease_sql.count("%s"), (
+        f"params {len(lease_params)} != placeholders {lease_sql.count('%s')}")
 
     bump_sql = captured["sql"][3]
     assert "acquire_count = COALESCE(acquire_count, 0) + 1" in bump_sql
