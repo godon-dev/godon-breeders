@@ -273,9 +273,28 @@ class ProbeCoordinator:
             logger.warning(f"Failed to cleanup stale state: {e}")
 
     def _try_acquire_lease(self, phase: str) -> bool:
+        """Acquire the sender lease under fair-share turn taking.
+
+        Publishes this breeder's walk demand, then acquires only while no
+        walk-pending active peer has had fewer lease turns than us. Poll
+        speed cannot beat the count: a starved peer always outranks a
+        recently served one.
+        """
         stale = self._stale_interval()
+        window = str(self.ACTIVE_BREEDER_WINDOW_SECONDS)
+        want = self._walk_pending()
+
         def op(conn):
             cur = conn.cursor()
+            # Publish demand (I am a candidate while my walk has work).
+            cur.execute(
+                "UPDATE interference_active_breeders "
+                "SET walk_pending = %s, last_seen = NOW() "
+                "WHERE breeder_id = %s",
+                (want, self.breeder_id)
+            )
+            # Guarded acquire: free or stale lease, and no walking peer
+            # with a smaller turn count.
             cur.execute(
                 "UPDATE sender_lease "
                 "SET holder = %s, token = token + 1, phase = %s, "
@@ -285,14 +304,32 @@ class ProbeCoordinator:
                 "holder IS NULL "
                 "OR last_heartbeat IS NULL "
                 "OR last_heartbeat < NOW() - INTERVAL '" + stale + " seconds'"
+                ") "
+                "AND NOT EXISTS ("
+                "SELECT 1 FROM interference_active_breeders p "
+                "WHERE p.group_id = %s AND p.breeder_id <> %s "
+                "AND p.last_seen > NOW() - INTERVAL '" + window + " seconds' "
+                "AND p.walk_pending IS TRUE "
+                "AND COALESCE(p.acquire_count, 0) < COALESCE(("
+                "SELECT acquire_count FROM interference_active_breeders "
+                "WHERE group_id = %s AND breeder_id = %s"
+                "), 0)"
                 ")",
-                (self.breeder_id, phase, self.group_id)
+                (self.breeder_id, want, self.breeder_id, phase,
+                 self.group_id, self.group_id, self.breeder_id,
+                 self.group_id, self.breeder_id)
             )
             updated = cur.rowcount
             if updated > 0:
                 cur.execute("SELECT token FROM sender_lease WHERE group_id = %s",
                             (self.group_id,))
                 self._lease_token = cur.fetchone()[0]
+                cur.execute(
+                    "UPDATE interference_active_breeders "
+                    "SET acquire_count = COALESCE(acquire_count, 0) + 1 "
+                    "WHERE breeder_id = %s",
+                    (self.breeder_id,)
+                )
             cur.close()
             return updated > 0
         try:

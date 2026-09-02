@@ -390,6 +390,17 @@ class BreederWorker:
                     "ALTER TABLE interference_active_breeders "
                     "ADD COLUMN IF NOT EXISTS group_id VARCHAR(255) NOT NULL DEFAULT 'default'"
                 )
+            # Lease fairness bookkeeping: walk_pending declares demand for
+            # the sender lease; acquire_count records turns held. Acquire
+            # is denied while a walking peer has had fewer turns.
+            cur.execute(
+                "ALTER TABLE interference_active_breeders "
+                "ADD COLUMN IF NOT EXISTS walk_pending BOOLEAN"
+            )
+            cur.execute(
+                "ALTER TABLE interference_active_breeders "
+                "ADD COLUMN IF NOT EXISTS acquire_count INT DEFAULT 0"
+            )
             # Standing dials: this breeder's applied params, refreshed per
             # trial. Read by causal to stamp curve points with the ambient
             # they were measured under.
