@@ -1173,3 +1173,113 @@ def test_acquire_without_demand_still_counts_turn():
     assert seen["walk"] is False
     print("  demand=False published; lease acquired; turn counted")
     print("  PASS")
+
+
+def test_walk_complete_publishes_demand_false():
+    """Deadlock (seed-47-extended, run 33720423947): a finished walker
+    exits at the 'walk complete' early-return, which never re-publishes
+    demand. Its walk_pending flag stayed TRUE in the DB forever (heartbeat
+    keeps last_seen fresh, so the staleness filter never excludes it) and
+    the fair-share predicate — fresh walk-pending peer with fewer turns —
+    denied every active walker for the rest of the run. The completion
+    path must clear the flag it last published as TRUE."""
+    print("\n=== test_walk_complete_publishes_demand_false ===")
+    coord = _parked_coord()
+    coord._walk_pending = lambda: False
+    coord._has_active_sender = lambda: False
+    coord._count_active_breeders = lambda: 3
+    captured = {"sql": [], "params": []}
+
+    class _Cur:
+        def execute(self, sql, params=None):
+            captured["sql"].append(sql)
+            captured["params"].append(params)
+
+        def close(self):
+            pass
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    coord._db = lambda fn, desc=None: fn(_Conn())
+
+    result = coord._handle_optimize(types.SimpleNamespace(number=1))
+
+    assert result["mode"] == "hold", f"expected park, got {result}"
+    pub = [(s, p) for s, p in zip(captured["sql"], captured["params"])
+           if "SET walk_pending" in s]
+    assert pub, "walk-complete path must publish demand"
+    assert pub[0][1][0] is False, f"demand must clear, got {pub[0][1]}"
+    print("  walk complete → demand=False published; parked")
+    print("  PASS")
+
+
+def test_denied_acquire_names_the_block():
+    """The deadlock ran ~2090 silent denials with zero log lines: the
+    fair-share acquire returns False with no reason attached. A denial
+    must emit a diagnostic — holder, heartbeat age, blocking peers —
+    so a live blockage is visible in Loki within one poll cycle."""
+    print("\n=== test_denied_acquire_names_the_block ===")
+    import engine.probe_coordinator as pc
+    coord = _parked_coord()
+    coord._walk_pending = lambda: True
+    logs = []
+
+    class _Log:
+        def info(self, fmt, *a):
+            logs.append(fmt % a if a else fmt)
+
+        def warning(self, fmt, *a):
+            logs.append("WARN " + (fmt % a if a else fmt))
+
+    saved = pc.logger
+    pc.logger = _Log()
+    try:
+        class _Cur:
+            rowcount = 0
+
+            def execute(self, sql, params=None):
+                self.sql = sql
+
+            def fetchone(self):
+                if "sender_lease" in self.sql:
+                    return ("05aa7f7d", 12.0)
+                return None
+
+            def fetchall(self):
+                if "interference_active_breeders" in self.sql:
+                    return [("6a1db105", 1, 3.0)]
+                return []
+
+            def close(self):
+                pass
+
+        class _Conn:
+            def cursor(self):
+                return _Cur()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        coord._db = lambda fn, desc=None: fn(_Conn())
+        got = coord._try_acquire_lease(coord.PROBE_PUSH)
+    finally:
+        pc.logger = saved
+
+    assert got is False
+    denial = [l for l in logs if "denied" in l]
+    assert denial, f"no denial diagnostic logged; got {logs}"
+    assert "05aa7f7d" in denial[0], "denial must name the denied breeder"
+    assert "6a1db105" in denial[0], "denial must name the blocking peer"
+    print("  denial logged:", denial[0][:120])
+    print("  PASS")

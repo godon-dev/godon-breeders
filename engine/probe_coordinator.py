@@ -272,6 +272,22 @@ class ProbeCoordinator:
         except Exception as e:
             logger.warning(f"Failed to cleanup stale state: {e}")
 
+    def _publish_demand(self, want: bool) -> None:
+        """Publish (or clear) this breeder's walk-demand flag."""
+        def op(conn):
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE interference_active_breeders "
+                "SET walk_pending = %s, last_seen = NOW() "
+                "WHERE breeder_id = %s",
+                (want, self.breeder_id)
+            )
+            cur.close()
+        try:
+            self._db(op, "publish_demand")
+        except Exception as e:
+            logger.warning(f"Failed to publish demand: {e}")
+
     def _try_acquire_lease(self, phase: str) -> bool:
         """Acquire the sender lease under fair-share turn taking.
 
@@ -320,6 +336,32 @@ class ProbeCoordinator:
                  self.group_id, self.breeder_id)
             )
             updated = cur.rowcount
+            if updated == 0:
+                # A silent denial is invisible: name the block (seed-47
+                # deadlock ran ~2090 denials with zero log lines).
+                cur.execute(
+                    "SELECT holder, "
+                    "EXTRACT(EPOCH FROM (NOW() - last_heartbeat)) "
+                    "FROM sender_lease WHERE group_id = %s",
+                    (self.group_id,)
+                )
+                lease_row = cur.fetchone()
+                cur.execute(
+                    "SELECT breeder_id, COALESCE(acquire_count, 0), "
+                    "EXTRACT(EPOCH FROM (NOW() - last_seen)) "
+                    "FROM interference_active_breeders "
+                    "WHERE group_id = %s AND breeder_id <> %s "
+                    "AND walk_pending IS TRUE",
+                    (self.group_id, self.breeder_id)
+                )
+                logger.info(
+                    "Lease acquire denied for %s (phase=%s): holder=%s "
+                    "heartbeat_age=%s walk_pending_peers=%s",
+                    self.breeder_id, phase,
+                    lease_row[0] if lease_row else None,
+                    lease_row[1] if lease_row else None,
+                    cur.fetchall()
+                )
             if updated > 0:
                 cur.execute("SELECT token FROM sender_lease WHERE group_id = %s",
                             (self.group_id,))
@@ -938,8 +980,13 @@ class ProbeCoordinator:
                 return self._idle_result()
 
         # A finished walk never re-acquires: acquire → ask → None → DONE
-        # would loop, starving the group's remaining walkers.
+        # would loop, starving the group's remaining walkers. It must
+        # still republish demand=False: its last publish (inside the
+        # walk) left walk_pending TRUE and nothing else refreshes the
+        # flag — a stale TRUE then denies every active walker forever
+        # (seed-47 deadlock, run 33720423947).
         if not self._walk_pending():
+            self._publish_demand(False)
             return self._park_result('walk complete')
 
         # Try to become sender
