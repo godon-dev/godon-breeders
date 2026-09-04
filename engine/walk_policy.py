@@ -128,7 +128,7 @@ class WalkPolicy:
     def status(self):
         """Per-param walk state for the CHAR PROGRESS trail."""
         out = {}
-        for name, (lo, hi, _is_int) in self._bounds.items():
+        for name, (lo, hi, is_int) in self._bounds.items():
             try:
                 view = self.view(name)
             except Exception:
@@ -138,9 +138,15 @@ class WalkPolicy:
                 for lv in curve.get("levels", []):
                     levels.add(round(lv, 9))
             level = view.get("refinement_level", 0)
+            if is_int:
+                step = 1.0
+                total = int(round(hi)) - int(round(lo)) + 1
+            else:
+                step = (hi - lo) / float(2 ** (level + 2))
+                total = int(round((hi - lo) / step)) + 1
             out[name] = {
-                "step": (hi - lo) / float(2 ** (level + 2)),
-                "levels_total": None,
+                "step": step,
+                "levels_total": total,
                 "levels_measured": len(levels),
                 "levels": sorted(levels),
             }
