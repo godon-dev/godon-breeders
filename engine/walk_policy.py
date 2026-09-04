@@ -14,6 +14,11 @@ geometric sweep — the safe fallback.
 """
 
 
+import logging
+
+logger = logging.getLogger(__name__)
+
+
 class WalkPolicy:
     def __init__(self, causal_url, group_id, breeder_id, refinement_depth,
                  param_bounds, transport=None):
@@ -32,21 +37,13 @@ class WalkPolicy:
         qs = urlencode({"param": param, "group": self._group})
         return self._transport("GET", f"{self._url}/walk-view/{self._breeder}?{qs}")
 
-    def refine(self, param):
-        return self._transport(
-            "POST",
-            f"{self._url}/walk-view/refine",
-            payload={"group_id": self._group, "sender_id": self._breeder,
-                     "probe_param": param},
-        )
-
     @staticmethod
     def _urllib_transport(method, url, payload=None):
         import json as _json
         import urllib.request
-        # 10 s: causal RTT is ~ms; this guards a hung socket, it does not
-        # time-box computation (probe_result carries the adaptive timeout).
-        timeout = 10.0
+        # 2 s: causal RTT is ~ms; this guards a hung socket so a dead
+        # causal degrades to the blind ladder within one init, not minutes.
+        timeout = 2.0
         req = urllib.request.Request(
             url,
             data=_json.dumps(payload).encode() if payload is not None else None,
@@ -77,7 +74,14 @@ class WalkPolicy:
 
     def _next_level(self, name):
         lo, hi, is_int = self._bounds[name]
-        view = self.view(name)
+        try:
+            view = self.view(name)
+        except Exception as e:
+            logger.warning(
+                "walk-view unreachable for %s (%s) — param reports done; "
+                "the notebook is authoritative, blind-guessing is not",
+                name, e)
+            return None
         measured = set()
         for curve in view.get("curves", []):
             for lv in curve.get("levels", []):
@@ -119,13 +123,19 @@ class WalkPolicy:
     def can_probe(self, skip):
         return self.next_probe(set(skip)) is not None
 
-    def refine(self, param):
-        return self._transport(
-            "POST",
-            f"{self._url}/walk-view/refine",
-            payload={"group_id": self._group, "sender_id": self._breeder,
-                     "probe_param": param},
-        )
+    def refine(self, param=None):
+        """Descend a floor: one param, or every bounded param when None."""
+        params = [param] if param is not None else list(self._bounds)
+        for p in params:
+            try:
+                self._transport(
+                    "POST",
+                    f"{self._url}/walk-view/refine",
+                    payload={"group_id": self._group, "sender_id": self._breeder,
+                             "probe_param": p},
+                )
+            except Exception as e:
+                logger.warning("walk-view refine failed for %s (%s)", p, e)
 
     def status(self):
         """Per-param walk state for the CHAR PROGRESS trail."""

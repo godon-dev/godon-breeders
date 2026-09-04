@@ -196,3 +196,21 @@ class TestNotebook:
             ])])})
         p = make_policy(t_restarted, bounds={"param_0": (0.0, 100.0, False)})
         assert p.next_probe(set()) == ("param_0", 25.0)
+
+
+class TestDegradation:
+    def test_dead_causal_next_probe_returns_none(self):
+        class Dead:
+            def __call__(self, method, url, payload=None):
+                raise ConnectionError("causal down")
+
+        p = make_policy(Dead(), bounds={"param_0": (0.0, 100.0, False)})
+        assert p.next_probe(set()) is None, "dead notebook degrades, never crashes"
+
+    def test_dead_causal_refine_does_not_raise(self):
+        class Dead:
+            def __call__(self, method, url, payload=None):
+                raise ConnectionError("causal down")
+
+        p = make_policy(Dead(), bounds={"param_0": (0.0, 100.0, False)})
+        p.refine()  # must not raise

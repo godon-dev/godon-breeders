@@ -707,11 +707,14 @@ class ProbeCoordinator:
         # remaining ignorance (jump × width / range) is below the local
         # measurement bar, so one more probe cannot see anything.
         gaps = result.get('gaps') or []
-        local_bar = result.get('shift_bar') or 0.0
+        # Per-gap bar: each bracket is priced against its OWN endpoint
+        # fuzz (bars_sum), not the primary listener's — a quiet listener's
+        # gap must not look cheap because a loud one is noisy. The union
+        # now includes the sender's self-curve (causal folds it in).
         blocking = [
             g for g in gaps
             if g.get('unresolved')
-            and g.get('ignorance', float('inf')) > local_bar
+            and g.get('ignorance', float('inf')) > g.get('bars_sum', 0.0)
         ]
         if converged and not blocking:
             if param_name not in self._converged_params:
@@ -741,6 +744,10 @@ class ProbeCoordinator:
         # Production imports this module as f.breeder.engine.* (Windmill
         # repo layout); the test harness imports it as engine.*.
         try:
+            from f.breeder.engine.walk_policy import WalkPolicy
+        except ImportError:
+            from engine.walk_policy import WalkPolicy
+        try:
             from f.breeder.engine.coverage_walk import CoverageWalk
         except ImportError:
             from engine.coverage_walk import CoverageWalk
@@ -767,7 +774,38 @@ class ProbeCoordinator:
             self._param_names.append(name)
             walk_bounds[name] = (lower, upper, bool(is_int))
 
-        self._char_walk = CoverageWalk(walk_bounds)
+        # Notebook walk (causal IS the notebook: stateless policy over the
+        # banked curves, compass steering, self-curve in the verdict) when
+        # causal answers; the deterministic ladder stays as the blind
+        # fallback — the same "continuing blind" grace the probe result
+        # path has always had. Probed once per init; retried next
+        # invocation, so a flaky causal never latches the fallback.
+        det_cfg = self.config.get('interference_detection',
+                                  self.config.get('detection', {}))
+        transport = det_cfg.get('walk_transport')
+        if transport is not None:
+            self._char_walk = WalkPolicy(
+                causal_url=self._causal_url, group_id=self.group_id,
+                breeder_id=self.breeder_id,
+                refinement_depth=self.refinement_depth,
+                param_bounds=walk_bounds, transport=transport)
+            logger.info("CHAR INIT: notebook walk (injected transport)")
+        else:
+            try:
+                policy = WalkPolicy(
+                    causal_url=self._causal_url, group_id=self.group_id,
+                    breeder_id=self.breeder_id,
+                    refinement_depth=self.refinement_depth,
+                    param_bounds=walk_bounds)
+                if self._param_names:
+                    policy.view(self._param_names[0])
+                self._char_walk = policy
+                logger.info("CHAR INIT: notebook walk (causal reachable)")
+            except Exception as e:
+                self._char_walk = CoverageWalk(walk_bounds)
+                logger.info(
+                    f"CHAR INIT: causal notebook unreachable ({e}) — "
+                    f"blind ladder (retried next invocation)")
 
         floors = ", ".join(
             f"{n}={self._char_walk.status()[n]['step']:.1f}"
