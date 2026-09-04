@@ -198,19 +198,23 @@ class TestNotebook:
         assert p.next_probe(set()) == ("param_0", 25.0)
 
 
-class TestDegradation:
-    def test_dead_causal_next_probe_returns_none(self):
+class TestNoSilentFallback:
+    def test_dead_causal_next_probe_raises(self):
+        """No notebook, no walk — a dead causal fails the step loudly
+        instead of guessing (guessing is how thin maps were born)."""
         class Dead:
             def __call__(self, method, url, payload=None):
                 raise ConnectionError("causal down")
 
         p = make_policy(Dead(), bounds={"param_0": (0.0, 100.0, False)})
-        assert p.next_probe(set()) is None, "dead notebook degrades, never crashes"
+        with pytest.raises(ConnectionError):
+            p.next_probe(set())
 
-    def test_dead_causal_refine_does_not_raise(self):
+    def test_dead_causal_refine_raises(self):
         class Dead:
             def __call__(self, method, url, payload=None):
                 raise ConnectionError("causal down")
 
         p = make_policy(Dead(), bounds={"param_0": (0.0, 100.0, False)})
-        p.refine()  # must not raise
+        with pytest.raises(ConnectionError):
+            p.refine()

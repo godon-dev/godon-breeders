@@ -775,11 +775,12 @@ class ProbeCoordinator:
             walk_bounds[name] = (lower, upper, bool(is_int))
 
         # Notebook walk (causal IS the notebook: stateless policy over the
-        # banked curves, compass steering, self-curve in the verdict) when
-        # causal answers; the deterministic ladder stays as the blind
-        # fallback — the same "continuing blind" grace the probe result
-        # path has always had. Probed once per init; retried next
-        # invocation, so a flaky causal never latches the fallback.
+        # banked curves, compass steering, self-curve in the verdict).
+        # There is NO blind fallback: an unreachable notebook raises — a
+        # silent rigid ladder would freeze thin maps and hide the cause.
+        # The invocation dies loudly and the next one retries; resume is
+        # exact, so a loud failure costs one invocation, not the data.
+        # 'ladder' exists only as an explicit legacy opt-in (offline tests).
         det_cfg = self.config.get('interference_detection',
                                   self.config.get('detection', {}))
         transport = det_cfg.get('walk_transport')
@@ -790,22 +791,19 @@ class ProbeCoordinator:
                 refinement_depth=self.refinement_depth,
                 param_bounds=walk_bounds, transport=transport)
             logger.info("CHAR INIT: notebook walk (injected transport)")
+        elif det_cfg.get('walk_policy', 'notebook') == 'ladder':
+            self._char_walk = CoverageWalk(walk_bounds)
+            logger.info("CHAR INIT: legacy ladder (explicitly configured)")
         else:
-            try:
-                policy = WalkPolicy(
-                    causal_url=self._causal_url, group_id=self.group_id,
-                    breeder_id=self.breeder_id,
-                    refinement_depth=self.refinement_depth,
-                    param_bounds=walk_bounds)
-                if self._param_names:
-                    policy.view(self._param_names[0])
-                self._char_walk = policy
-                logger.info("CHAR INIT: notebook walk (causal reachable)")
-            except Exception as e:
-                self._char_walk = CoverageWalk(walk_bounds)
-                logger.info(
-                    f"CHAR INIT: causal notebook unreachable ({e}) — "
-                    f"blind ladder (retried next invocation)")
+            policy = WalkPolicy(
+                causal_url=self._causal_url, group_id=self.group_id,
+                breeder_id=self.breeder_id,
+                refinement_depth=self.refinement_depth,
+                param_bounds=walk_bounds)
+            if self._param_names:
+                policy.view(self._param_names[0])  # notebook must answer
+            self._char_walk = policy
+            logger.info("CHAR INIT: notebook walk (causal reachable)")
 
         floors = ", ".join(
             f"{n}={self._char_walk.status()[n]['step']:.1f}"

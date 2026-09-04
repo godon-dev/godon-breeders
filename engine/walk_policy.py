@@ -14,11 +14,6 @@ geometric sweep — the safe fallback.
 """
 
 
-import logging
-
-logger = logging.getLogger(__name__)
-
-
 class WalkPolicy:
     def __init__(self, causal_url, group_id, breeder_id, refinement_depth,
                  param_bounds, transport=None):
@@ -74,14 +69,10 @@ class WalkPolicy:
 
     def _next_level(self, name):
         lo, hi, is_int = self._bounds[name]
-        try:
-            view = self.view(name)
-        except Exception as e:
-            logger.warning(
-                "walk-view unreachable for %s (%s) — param reports done; "
-                "the notebook is authoritative, blind-guessing is not",
-                name, e)
-            return None
+        # The notebook is authoritative: if it is unreachable the walk
+        # FAILS LOUDLY here (the invocation dies, the next one retries) —
+        # it never guesses, and never silently freezes at the anchors.
+        view = self.view(name)
         measured = set()
         for curve in view.get("curves", []):
             for lv in curve.get("levels", []):
@@ -127,15 +118,12 @@ class WalkPolicy:
         """Descend a floor: one param, or every bounded param when None."""
         params = [param] if param is not None else list(self._bounds)
         for p in params:
-            try:
-                self._transport(
-                    "POST",
-                    f"{self._url}/walk-view/refine",
-                    payload={"group_id": self._group, "sender_id": self._breeder,
-                             "probe_param": p},
-                )
-            except Exception as e:
-                logger.warning("walk-view refine failed for %s (%s)", p, e)
+            self._transport(
+                "POST",
+                f"{self._url}/walk-view/refine",
+                payload={"group_id": self._group, "sender_id": self._breeder,
+                         "probe_param": p},
+            )
 
     def status(self):
         """Per-param walk state for the CHAR PROGRESS trail."""

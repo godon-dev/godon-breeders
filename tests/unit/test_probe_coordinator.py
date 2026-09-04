@@ -66,6 +66,7 @@ def _config(params=None, **overrides):
             'min_optimize_trials': 2,
             'convergence_threshold': 0.02,
             'refinement_depth': 3,
+            'walk_policy': 'ladder',  # offline: geometric, no notebook
         },
     }
     cfg['interference_detection'].update(overrides)
