@@ -168,6 +168,8 @@ class TestShouldContinue:
             }
         })
         worker.study.trials = [MagicMock() for _ in range(100)]
+        # Role ledger: the cap gates OWN-WORK trials (optimize + walk).
+        worker._own_trials = 100
         assert worker._should_continue() is False
 
     def test_stops_when_time_budget_exceeded(self):
@@ -386,6 +388,12 @@ class TestRunLoop:
 
         worker.study.tell = fake_tell
         worker.study.trials = real_trials
+
+        # The iteration cap gates WALK trials (role ledger): the fake
+        # coordinator must report walking mode, or the loop never stops.
+        worker._probe_coordinator.decide_trial = MagicMock(
+            return_value={'mode': 'impulse',
+                          'params': {'vm.swappiness': 10}})
         best_mock = MagicMock()
         best_mock.number = -1
         worker.study.best_trials = [best_mock]

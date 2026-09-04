@@ -1115,15 +1115,23 @@ def test_acquire_publishes_demand_and_carries_fair_share_guard():
             return False
 
     coord._db = lambda fn, desc=None: fn(_Conn())
+    # The quantum rung's need-defer reads /curves before the SQL guard;
+    # stub it out — this test owns the SQL-guard assertions.
+    coord._defer_to_needier_peer = lambda: False
 
     assert coord._try_acquire_lease(coord.PROBE_PUSH) is True
 
-    pub_sql, pub_params = captured["sql"][0], captured["params"][0]
+    def _capture_with(fragment):
+        for sql, params in zip(captured["sql"], captured["params"]):
+            if fragment in sql:
+                return sql, params
+        raise AssertionError(f"no captured query contains {fragment!r}")
+
+    pub_sql, pub_params = _capture_with("walk_pending")
     assert "interference_active_breeders" in pub_sql
-    assert "walk_pending" in pub_sql
     assert pub_params[0] is True
 
-    lease_sql, lease_params = captured["sql"][1], captured["params"][1]
+    lease_sql, lease_params = _capture_with("NOT EXISTS")
     assert "NOT EXISTS" in lease_sql, "fair-share guard missing"
     assert "walk_pending IS TRUE" in lease_sql, "demand filter missing"
     assert "acquire_count" in lease_sql, "turn-count comparison missing"
