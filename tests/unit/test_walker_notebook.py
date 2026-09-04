@@ -30,16 +30,20 @@ def _config():
             'cooldown_trials': 5,
             'convergence_threshold': 0.005,
             'refinement_depth': 3,
+            # two-key tests below don't exercise the walk; keep them
+            # offline unless the notebook transport is injected
+            'walk_policy': 'ladder',
         },
     }
 
 
 # NOTE: the coordinator constructor is the DI seam for tests — if the
 # constructor does not accept walk_transport, build via config instead.
-def _coordinator_via_config(walk_transport=None):
+def _coordinator_via_config(walk_transport=None, overrides=None):
     cfg = _config()
     if walk_transport is not None:
         cfg['interference_detection']['walk_transport'] = walk_transport
+    cfg['interference_detection'].update(overrides or {})
     return ProbeCoordinator(
         breeder_id='B4',
         config=cfg,
@@ -146,3 +150,13 @@ def test_two_key_releases_fully_priced_out_param():
     coord._process_probe_result({'param_name': 'param_0', 'level': 50.0})
     assert 'param_0' in coord._converged_params, \
         "stability + fully priced out = the honest stop"
+
+
+def test_notebook_unreachable_fails_loudly():
+    """No silent rigid-ladder fallback: an unreachable notebook kills the
+    init — the invocation dies visibly and the next one retries."""
+    import pytest
+    coord = _coordinator_via_config(overrides={'walk_policy': 'notebook'})
+    with pytest.raises(Exception):
+        coord._init_characterization()
+    assert coord._char_walk is None
