@@ -183,6 +183,7 @@ class TestNotebook:
                               "sender_id": "B4", "probe_param": "param_0"}]
         st = p.status()["param_0"]
         assert st["step"] == pytest.approx(100.0 / 2 ** (1 + 2))
+        assert st["levels_total"] == 9, "floor 12.5 lattice: 0..100 in 12.5 steps + bounds"
 
     def test_resume_exactness_matches_uninterrupted_choice(self):
         # The core property: a walker that died and restarted from the
