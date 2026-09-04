@@ -200,3 +200,43 @@ class TestNeedDefer:
                                "bars_sum": 0.04, "unresolved": True, "ignorance": 0.9}]}}]})
 
         assert not coord._defer_to_needier_peer(), "own need higher → take the mic"
+
+
+class TestDeferredStillPublishes:
+    def test_deferred_acquire_still_publishes_demand(self):
+        """Seed-51 bug: need-defer exited BEFORE the demand publication,
+        so deferred breeders were invisible to the holder's yield check.
+        Cure: the demand is ALWAYS published; only the grant is refused."""
+        class _Conn:
+            def cursor(self):
+                return self
+            captured_sql, captured_params = [], []
+        # lightweight capture without reimplementing the conn API
+        captured = {"sql": [], "params": []}
+        class _Cur:
+            def execute(self, sql, params=None):
+                captured["sql"].append(sql)
+                captured["params"].append(params)
+            def fetchone(self):
+                return None
+            def fetchall(self):
+                return []
+            def close(self):
+                pass
+        class _Conn2:
+            def cursor(self):
+                return _Cur()
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+
+        coord = _coordinator()
+        coord._db = lambda fn, desc=None: fn(_Conn2())
+        coord._defer_to_needier_peer = lambda: True  # needier peer exists
+        coord._char_walk = _WalkStub()
+
+        assert coord._try_acquire_lease(coord.PROBE_PUSH) is False, (
+            "needier peer → the grant is refused")
+        demand = [s for s in captured["sql"] if "walk_pending" in s]
+        assert demand, "deferred attempt must STILL publish its demand"

@@ -359,27 +359,40 @@ class ProbeCoordinator:
     def _try_acquire_lease(self, phase: str) -> bool:
         """Acquire the sender lease under fair-share turn taking.
 
-        Publishes this breeder's walk demand, then acquires only while no
-        walk-pending active peer has had fewer lease turns than us. Poll
-        speed cannot beat the count: a starved peer always outranks a
-        recently served one.
+        Publishes this breeder's walk demand ALWAYS (deferred breeders
+        stay visible to the holder's yield check), then acquires only
+        while no walk-pending active peer has had fewer lease turns and
+        no pending peer is needier. Poll speed cannot beat the count: a
+        starved peer always outranks a recently served one.
         """
-        if self._defer_to_needier_peer():
-            return False
-
         stale = self._stale_interval()
         window = str(self.ACTIVE_BREEDER_WINDOW_SECONDS)
         want = self._walk_pending()
 
-        def op(conn):
+        # Publish demand FIRST — always, even when the acquire will be
+        # deferred. A deferred breeder's demand must stay visible to the
+        # holder's yield check (seed-51: need-defer suppressed the
+        # publication, the holder never saw contention, and the quantum
+        # never fired).
+        def publish(conn):
             cur = conn.cursor()
-            # Publish demand (I am a candidate while my walk has work).
             cur.execute(
                 "UPDATE interference_active_breeders "
                 "SET walk_pending = %s, last_seen = NOW() "
                 "WHERE breeder_id = %s",
                 (want, self.breeder_id)
             )
+        self._db(publish, "publish_demand")
+
+        # Need-defer refuses the GRANT, never the publication.
+        if self._defer_to_needier_peer():
+            logger.info(
+                f"ACQUIRE: deferred — needier pending peer walks first "
+                f"(demand stays published)")
+            return False
+
+        def op(conn):
+            cur = conn.cursor()
             # Guarded acquire: free or stale lease, and no walking peer
             # with a smaller turn count.
             cur.execute(
