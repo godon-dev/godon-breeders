@@ -95,6 +95,12 @@ class BreederWorker:
 
     def __init__(self, config: Dict[str, Any]):
         self.config = config
+        # Role ledger: own-work trials (optimize + walk) consume the
+        # iteration cap. Hold trials — standing still during someone
+        # else's walk — are cooperation, not budget spend, and never
+        # consume it (seed-50: followers died at cap having never
+        # walked).
+        self._own_trials = 0
         breeder_config = config.get('breeder', {})
 
         self.breeder_type = breeder_config.get('type', 'unknown_breeder')
@@ -895,8 +901,13 @@ class BreederWorker:
         if n_trials < min_iterations:
             logger.debug(f"Continuing: {n_trials} < {min_iterations} min iterations")
             return True
-        if n_trials >= max_iterations:
-            logger.info(f"Stopping: {n_trials} >= {max_iterations} max iterations")
+        # The iteration cap gates OWN-WORK trials: optimizing and walking
+        # spend the budget. Holding through another breeder's walk is
+        # cooperation and stays free (role ledger).
+        if self._own_trials >= max_iterations:
+            logger.info(
+                f"Stopping: {self._own_trials} own trials >= "
+                f"{max_iterations} max iterations")
             return False
 
         if self._check_time_budget(completion_criteria):
@@ -1052,6 +1063,8 @@ class BreederWorker:
 
                     # Tag trial for observer
                     trial.set_user_attr('detection_mode', detection_mode)
+                    if detection_mode != 'hold':
+                        self._own_trials += 1
                     trial.set_user_attr('coord_state', self._probe_coordinator.get_state())
                     if hasattr(self._probe_coordinator, 'get_char_status'):
                         trial.set_user_attr('char_status', self._probe_coordinator.get_char_status())

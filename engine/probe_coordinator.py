@@ -149,6 +149,15 @@ class ProbeCoordinator:
             'causal_url',
             os.environ.get('GODON_CAUSAL_URL', 'http://godon-godon-causal:9091'))
 
+        # Quantum: the slice of probe cycles one breeder holds the lease
+        # before yielding to a walk-pending peer. Yield only under
+        # contention (solo walkers run to completion, zero churn).
+        # One-liner for the default: at least one ladder step per turn,
+        # handoff tax <5%, full rota cycle <=20 min at 4 breeders.
+        self.quantum_cycles = det_cfg.get('quantum_cycles', 3)
+        self._stretch_cycles = 0
+        self._walk_transport = det_cfg.get('walk_transport')
+
         # State
         self.state = self.OPTIMIZE
         self._initialized = False
@@ -288,6 +297,65 @@ class ProbeCoordinator:
         except Exception as e:
             logger.warning(f"Failed to publish demand: {e}")
 
+    def _walk_pending_peers(self):
+        """Live group members (other than us) that want to walk."""
+        window = str(self.ACTIVE_BREEDER_WINDOW_SECONDS)
+
+        def op(conn):
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT breeder_id FROM interference_active_breeders "
+                "WHERE group_id = %s AND breeder_id <> %s "
+                "AND last_seen > NOW() - INTERVAL '" + window + " seconds' "
+                "AND walk_pending IS TRUE",
+                (self.group_id, self.breeder_id))
+            return [r[0] for r in cur.fetchall()]
+
+        try:
+            return self._db(op, "walk_pending_peers") or []
+        except Exception as e:
+            logger.warning(f"walk_pending_peers query failed ({e}) — assuming none")
+            return []
+
+    def _peer_walk_pending(self) -> bool:
+        """Contention check: does another live member want the mic?"""
+        return bool(self._walk_pending_peers())
+
+    def _defer_to_needier_peer(self) -> bool:
+        """Defer the acquire to a walk-pending peer whose outstanding
+        priced ignorance is strictly higher. Equal or lower -> take the
+        mic. Reads the public curve export; on any failure, does not
+        defer (the turn-count guard still applies)."""
+        peers = self._walk_pending_peers()
+        if not peers:
+            return False
+        try:
+            try:
+                from f.breeder.engine.walk_policy import WalkPolicy
+            except ImportError:
+                from engine.walk_policy import WalkPolicy
+            transport = self._walk_transport or WalkPolicy._urllib_transport
+            data = transport("GET", f"{self._causal_url}/curves")
+        except Exception as e:
+            logger.warning(f"need-defer: /curves unavailable ({e}) — not deferring")
+            return False
+        need = {}
+        for c in (data or {}).get('curves', []):
+            snd = c.get('sender_id')
+            if snd not in peers:
+                continue
+            for g in (c.get('state', {}) or {}).get('gaps', []) or []:
+                if g.get('unresolved'):
+                    need[snd] = need.get(snd, 0.0) + float(g.get('ignorance', 0.0))
+        mine = need.get(self.breeder_id, 0.0)
+        for peer in peers:
+            if need.get(peer, 0.0) > mine:
+                logger.info(
+                    f"ACQUIRE: deferred to needier pending peer "
+                    f"{peer[:8]} (peer {need.get(peer, 0.0):.3f} > mine {mine:.3f})")
+                return True
+        return False
+
     def _try_acquire_lease(self, phase: str) -> bool:
         """Acquire the sender lease under fair-share turn taking.
 
@@ -296,6 +364,9 @@ class ProbeCoordinator:
         speed cannot beat the count: a starved peer always outranks a
         recently served one.
         """
+        if self._defer_to_needier_peer():
+            return False
+
         stale = self._stale_interval()
         window = str(self.ACTIVE_BREEDER_WINDOW_SECONDS)
         want = self._walk_pending()
@@ -1135,6 +1206,24 @@ class ProbeCoordinator:
 
             self._push_count = 0
             self._pause_count = 0
+
+            # Quantum yield: the lease is a shared microphone. A full
+            # slice with a pending peer -> step aside at the completed
+            # cycle boundary; the notebook resumes this walk exactly on
+            # the next acquire. Solo walkers never yield (zero churn).
+            self._stretch_cycles += 1
+            if (self._stretch_cycles >= self.quantum_cycles
+                    and self._peer_walk_pending()):
+                self._stretch_cycles = 0
+                self._release_lease()
+                self.state = self.COOLDOWN
+                self._cooldown_count = 0
+                logger.info(
+                    f"QUANTUM: {self.quantum_cycles} cycles served — "
+                    f"yielding lease (peer walk-pending); "
+                    f"walk resumes from notebook")
+                return self._idle_result()
+
             self.state = self.PROBE_PUSH
 
         return {
