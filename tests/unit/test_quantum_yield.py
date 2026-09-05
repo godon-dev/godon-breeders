@@ -70,7 +70,7 @@ def _mid_cycle_coord(peer_pending, quantum=2):
     """A coordinator completing the LAST pause trial of a cycle."""
     coord = _coordinator(**{'quantum_cycles': quantum})
     coord._char_walk = _WalkStub()
-    coord._peer_walk_pending = lambda: peer_pending
+    coord._live_peer_count = lambda: 3 if peer_pending else 0
     released = []
     coord._release_lease = lambda: released.append(1)
     coord._process_probe_result = lambda probe: {
@@ -94,13 +94,15 @@ class TestQuantumYield:
         assert coord._stretch_cycles == 0, "slice counter resets on yield"
         assert res.get('mode') != 'impulse', "no further push trials this stretch"
 
-    def test_solo_walker_never_yields(self):
-        coord, released = _mid_cycle_coord(peer_pending=False)
+    def test_yield_keys_on_peer_existence_not_their_flag(self):
+        """Seed-52 catch-22: peers in HOLD never publish walk_pending
+        (they only publish it when attempting an acquire, which they
+        can't do while a sender is active). The yield must key on their
+        EXISTENCE — a served slice with live peers yields."""
+        coord, released = _mid_cycle_coord(peer_pending=True)
         res = coord._handle_probe_pause(trial=None)
-        assert coord.state == coord.PROBE_PUSH, "no contention: keep walking"
-        assert not released
-        assert coord._stretch_cycles == 2, "slice counter keeps counting solo"
-
+        assert coord.state == coord.COOLDOWN, "live peers exist -> yield the mic"
+        assert released
     def test_unfilled_slice_does_not_yield(self):
         coord, released = _mid_cycle_coord(peer_pending=True, quantum=5)
         coord._stretch_cycles = 1  # slice not yet full
