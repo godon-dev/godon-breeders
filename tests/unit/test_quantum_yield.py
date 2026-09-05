@@ -3,8 +3,9 @@
 Seed-50 replay: one breeder held the lease for its entire walk while
 three followers held to cap, never walking. These tests pin the cure:
 a full slice with a pending peer yields the lease (at a completed
-probe-cycle boundary only), hold trials stop consuming the iteration
-budget, and a needier pending peer defers the acquire.
+probe-cycle boundary only), and hold trials stop consuming the
+iteration budget. Ordering is turn-fair (the role ledger's
+acquire_count); no map-state quantity gates the acquire.
 """
 
 import sys, os
@@ -154,51 +155,3 @@ class TestRoleLedger:
             "130 own-work trials over a 120 cap stops the breeder"
 
 
-class TestNeedDefer:
-    def test_defers_to_needier_pending_peer(self):
-        coord = _coordinator()
-        coord._walk_pending_peers = lambda: ["PEER"]
-        coord._walk_transport = lambda method, url, payload=None: {
-            "curves": [
-                {"sender_id": "PEER", "receiver_id": "X", "param": "param_0",
-                 "channel": "objective_0", "state": {
-                     "converged": False, "num_points": 3,
-                     "points": [[0.0, 0.0, 0.02], [50.0, 0.0, 0.02], [100.0, 1.0, 0.02]],
-                     "gaps": [{"from_level": 50.0, "to_level": 100.0, "jump": 1.0,
-                               "bars_sum": 0.04, "unresolved": True, "ignorance": 0.5}]}}]}
-
-        assert coord._defer_to_needier_peer(), "needier pending peer → defer"
-
-    def test_no_defer_when_own_need_is_higher(self):
-        coord = _coordinator()
-        coord._walk_transport = lambda method, url, payload=None: {
-            "curves": [
-                {"sender_id": "B4", "receiver_id": "X", "param": "param_0",
-                 "channel": "objective_0", "state": {
-                     "converged": False, "num_points": 3,
-                     "points": [[0.0, 0.0, 0.02], [50.0, 0.0, 0.02], [100.0, 1.0, 0.02]],
-                     "gaps": [{"from_level": 50.0, "to_level": 100.0, "jump": 1.0,
-                               "bars_sum": 0.04, "unresolved": True, "ignorance": 0.9}]}}]}
-        # Peer transport serves an empty notebook (no outstanding prices).
-        def empty_peer(method, url, payload=None):
-            return {"curves": []}
-        # _defer_to_needier_peer walks pending peers via its peer query;
-        # stub the peers to a single one with empty need.
-        coord._walk_pending_peers = lambda: ["PEER"]
-        coord._walk_transport = lambda method, url, payload=None: (
-            {"curves": [
-                {"sender_id": "PEER", "receiver_id": "X", "param": "param_0",
-                 "channel": "objective_0", "state": {
-                     "converged": True, "num_points": 3,
-                     "points": [[0.0, 0.0, 0.02], [50.0, 0.0, 0.02], [100.0, 0.0, 0.02]],
-                     "gaps": []}}]}
-            if "PEER" in url else
-            {"curves": [
-                {"sender_id": "B4", "receiver_id": "X", "param": "param_0",
-                 "channel": "objective_0", "state": {
-                     "converged": False, "num_points": 3,
-                     "points": [[0.0, 0.0, 0.02], [50.0, 0.0, 0.02], [100.0, 1.0, 0.02]],
-                     "gaps": [{"from_level": 50.0, "to_level": 100.0, "jump": 1.0,
-                               "bars_sum": 0.04, "unresolved": True, "ignorance": 0.9}]}}]})
-
-        assert not coord._defer_to_needier_peer(), "own need higher → take the mic"

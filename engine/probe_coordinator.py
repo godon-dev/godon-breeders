@@ -344,41 +344,6 @@ class ProbeCoordinator:
             logger.warning(f"live_peer_count query failed ({e}) — assuming contention")
             return 1
 
-    def _defer_to_needier_peer(self) -> bool:
-        """Defer the acquire to a walk-pending peer whose outstanding
-        priced ignorance is strictly higher. Equal or lower -> take the
-        mic. Reads the public curve export; on any failure, does not
-        defer (the turn-count guard still applies)."""
-        peers = self._walk_pending_peers()
-        if not peers:
-            return False
-        try:
-            try:
-                from f.breeder.engine.walk_policy import WalkPolicy
-            except ImportError:
-                from engine.walk_policy import WalkPolicy
-            transport = self._walk_transport or WalkPolicy._urllib_transport
-            data = transport("GET", f"{self._causal_url}/curves")
-        except Exception as e:
-            logger.warning(f"need-defer: /curves unavailable ({e}) — not deferring")
-            return False
-        need = {}
-        for c in (data or {}).get('curves', []):
-            snd = c.get('sender_id')
-            if snd not in peers:
-                continue
-            for g in (c.get('state', {}) or {}).get('gaps', []) or []:
-                if g.get('unresolved'):
-                    need[snd] = need.get(snd, 0.0) + float(g.get('ignorance', 0.0))
-        mine = need.get(self.breeder_id, 0.0)
-        for peer in peers:
-            if need.get(peer, 0.0) > mine:
-                logger.info(
-                    f"ACQUIRE: deferred to needier pending peer "
-                    f"{peer[:8]} (peer {need.get(peer, 0.0):.3f} > mine {mine:.3f})")
-                return True
-        return False
-
     def _try_acquire_lease(self, phase: str) -> bool:
         """Acquire the sender lease under fair-share turn taking.
 
@@ -386,10 +351,10 @@ class ProbeCoordinator:
         walk-pending active peer has had fewer lease turns than us. Poll
         speed cannot beat the count: a starved peer always outranks a
         recently served one.
-        """
-        if self._defer_to_needier_peer():
-            return False
 
+        Ordering is purely turn-fair (the role ledger's acquire_count);
+        no map-state quantity gates the acquire.
+        """
         stale = self._stale_interval()
         window = str(self.ACTIVE_BREEDER_WINDOW_SECONDS)
         want = self._walk_pending()
