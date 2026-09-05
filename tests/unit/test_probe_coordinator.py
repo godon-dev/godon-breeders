@@ -1115,9 +1115,6 @@ def test_acquire_publishes_demand_and_carries_fair_share_guard():
             return False
 
     coord._db = lambda fn, desc=None: fn(_Conn())
-    # The quantum rung's need-defer reads /curves before the SQL guard;
-    # stub it out — this test owns the SQL-guard assertions.
-    coord._defer_to_needier_peer = lambda: False
 
     assert coord._try_acquire_lease(coord.PROBE_PUSH) is True
 
