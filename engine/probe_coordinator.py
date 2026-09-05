@@ -321,6 +321,29 @@ class ProbeCoordinator:
         """Contention check: does another live member want the mic?"""
         return bool(self._walk_pending_peers())
 
+    def _live_peer_count(self) -> int:
+        """Live group members other than us — regardless of whether they
+        have managed to express walk demand yet. Peers sitting in HOLD
+        behind an active sender cannot publish walk_pending (they only
+        publish it when attempting an acquire), so their EXISTENCE is
+        the only signal the holder's yield check can rely on."""
+        window = str(self.ACTIVE_BREEDER_WINDOW_SECONDS)
+
+        def op(conn):
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT COUNT(*) FROM interference_active_breeders "
+                "WHERE group_id = %s AND breeder_id <> %s "
+                "AND last_seen > NOW() - INTERVAL '" + window + " seconds'",
+                (self.group_id, self.breeder_id))
+            return cur.fetchone()[0]
+
+        try:
+            return int(self._db(op, "live_peer_count") or 0)
+        except Exception as e:
+            logger.warning(f"live_peer_count query failed ({e}) — assuming contention")
+            return 1
+
     def _defer_to_needier_peer(self) -> bool:
         """Defer the acquire to a walk-pending peer whose outstanding
         priced ignorance is strictly higher. Equal or lower -> take the
@@ -1213,7 +1236,7 @@ class ProbeCoordinator:
             # the next acquire. Solo walkers never yield (zero churn).
             self._stretch_cycles += 1
             if (self._stretch_cycles >= self.quantum_cycles
-                    and self._peer_walk_pending()):
+                    and self._live_peer_count() > 0):
                 self._stretch_cycles = 0
                 self._release_lease()
                 self.state = self.COOLDOWN
